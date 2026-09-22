@@ -4,7 +4,7 @@ tests, no local data needed."""
 import pytest
 import torch
 
-from anvil.training.rl import entropy_hinge, vtrace_targets
+from anvil.training.rl import entropy_hinge, game_trajectories, vtrace_targets
 from anvil.training.selfplay import guard_flags
 
 
@@ -139,6 +139,27 @@ def test_draw_scores_zero_for_both_seats():
     vs, adv, _ = vtrace_targets(v, lp, lp, reward=0.0)
     assert torch.allclose(vs, torch.zeros(2))
     assert (adv < 0).all()
+
+
+def test_game_trajectories_skips_undecodable_frame():
+    """A single truncated observation frame must become a normal loader skip
+    instead of escaping through a DataLoader worker and aborting RL."""
+
+    class BadStore:
+        outcomes = {0: {"status": "won", "winner": "Anvil(1)-deck"}}
+
+        def mu_for_game(self, g):
+            return {1: {"task": "priority"}}
+
+        def winner_seat(self, g):
+            return 0
+
+        def game(self, g):
+            raise ValueError("decompression error: did not decompress full frame")
+
+    trajs, skip = game_trajectories(BadStore(), object(), 0)
+    assert trajs == []
+    assert skip == "decode:ValueError"
 
 
 def test_census_first_attempt_veto_basis(tmp_path):

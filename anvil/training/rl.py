@@ -425,10 +425,11 @@ def game_trajectories(
     Returns (trajs, skip_reason): trajs = [(seat, [(ex, rec), ...], reward,
     rej, exs_fv)]; reward per §3d — win 1, loss/draw/cap 0 (a stalling leader
     forfeits the +1); skip_reason set (and trajs empty) for crash/no-outcome
-    games, whose returns are engine artifacts, and for games without mu
-    records. full_vis (§6f): exs_fv = the asymmetric critic's windows (same
-    decisions, info-set gate bypassed) — consumed ONLY by the frozen critic's
-    value forward in pass A, never by the policy passes; [] when off."""
+    games, whose returns are engine artifacts, games without mu records, and
+    undecodable observation frames. full_vis (§6f): exs_fv = the asymmetric
+    critic's windows (same decisions, info-set gate bypassed) — consumed ONLY
+    by the frozen critic's value forward in pass A, never by the policy
+    passes; [] when off."""
     from anvil.bridge.featurize import store_wire_hist
 
     mu = store.mu_for_game(g)
@@ -441,7 +442,17 @@ def game_trajectories(
     if status not in ("won", "draw"):
         return [], f"status:{status}"
     winner = store.winner_seat(g)
-    traj = store.game(g)
+    try:
+        traj = store.game(g)
+    except Exception as exc:  # noqa: BLE001
+        # A store can contain one truncated/corrupt frame from a hard-capped
+        # or killed game.  TrajectoryStore.games(skip_undecodable=True) has
+        # quarantine semantics, but this per-game path is needed for mu joins
+        # and used to bypass that protection, crashing the DataLoader worker.
+        # Keep the reason short so the aggregate metrics key remains useful;
+        # the game id is carried by the yielded skip item and `anvil.store
+        # validate` reports the full exception when forensic detail is needed.
+        return [], f"decode:{type(exc).__name__}"
     by_seat: dict[int, list] = {}
     prior = []
     for dec in traj.decisions:
