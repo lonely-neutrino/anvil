@@ -27,6 +27,7 @@ import numpy as np
 import torch
 
 from anvil.encoder.transform import HISTORY_K, assemble, player_seats
+from anvil.store.castplan import ret_plans
 from anvil.training.dataset import (
     COMBAT_COUNT_MAX,
     KINDS,
@@ -85,7 +86,11 @@ def store_wire_hist(prior: list[dict], now_pos: int, k: int = HISTORY_K) -> list
     for d in prior[-k:]:
         ret = d.get("ret")
         host = -1
-        if (
+        if d.get("m") == "chooseSpellAbilityToPlay":
+            plans = ret_plans(ret)
+            if plans and d.get("_retpos") is not None and d["_retpos"] < now_pos:
+                host = plans[0].get("e", -1)
+        elif (
             isinstance(ret, list)
             and ret
             and isinstance(ret[0], dict)

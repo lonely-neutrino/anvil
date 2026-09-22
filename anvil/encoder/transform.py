@@ -30,6 +30,8 @@ from typing import Any
 
 import numpy as np
 
+from anvil.store.castplan import ret_plans
+
 TRANSFORM_VERSION = 4  # v4 (M3 D1): cmd_tax entity scalar — commander recast
 # surcharge (2 x cmdcast) on command-zone commander rows; the obs stream has
 # carried cmdcast since D1-of-M1, the featurizer just never read it
@@ -259,7 +261,14 @@ def history_tokens(
                 d.get("_retpos") is not None and d["_retpos"] < now_pos
             )
             ret = d.get("ret") if ret_arrived else None
-            if isinstance(ret, list) and ret and isinstance(ret[0], dict):
+            if d.get("m") == "chooseSpellAbilityToPlay":
+                plans = ret_plans(ret)
+                if plans:
+                    host = plans[0].get("e", -1)
+            elif isinstance(ret, list) and ret and isinstance(ret[0], dict):
+                # Other decision shapes can also return lists of entity refs,
+                # but they are not CastPlans and must not go through the
+                # priority-return normalizer.
                 host = ret[0].get("e", -1)
         out.append({"m": d.get("m", "?"), "self": 1 if actor == perspective else 0, "e": host})
     return out

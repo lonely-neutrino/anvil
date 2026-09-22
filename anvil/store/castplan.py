@@ -80,15 +80,29 @@ def parse_plan(v: dict[str, Any]) -> CastPlan:
     )
 
 
-def parse_ret(ret: Any) -> list[CastPlan] | None:
-    """A priority ret: None = pass; else the chosen SA list (usually one)."""
+def ret_plans(ret: Any) -> list[dict[str, Any]] | None:
+    """Normalize a priority CastPlan return to plan dictionaries.
+
+    The observation writer normally emits a one-element list, but some
+    single-plan paths emit the plan object directly.  Both shapes are part of
+    the accepted CastPlan contract; raw-dictionary consumers need the same
+    normalization as ``parse_ret``.
+    """
     if ret is None:
         return None
-    if isinstance(ret, dict):  # defensive: a bare object instead of a list
-        ret = [ret]
-    if not isinstance(ret, list):
-        raise ValueError(f"priority ret is neither null nor a list: {ret!r}")
-    return [parse_plan(v) for v in ret]
+    if isinstance(ret, dict):
+        return [ret]
+    if isinstance(ret, list):
+        if not all(isinstance(plan, dict) for plan in ret):
+            raise ValueError(f"CastPlan return contains a non-object item: {ret!r}")
+        return ret
+    raise ValueError(f"CastPlan return is neither an object nor a list: {ret!r}")
+
+
+def parse_ret(ret: Any) -> list[CastPlan] | None:
+    """A priority ret: None = pass; else the chosen SA list (usually one)."""
+    plans = ret_plans(ret)
+    return None if plans is None else [parse_plan(v) for v in plans]
 
 
 @dataclasses.dataclass
