@@ -442,6 +442,7 @@ class AnvilNet(nn.Module):
         src_vec = ent_out.gather(1, rows_src.unsqueeze(-1).expand(-1, -1, ent_out.shape[-1]))
         src_vec = src_vec.squeeze(1) * (batch["label"] > 0).unsqueeze(-1)
 
+        # Player keys are self-first; target labels use the same positions.
         p_keys = self.player_key(batch["players"])  # (B,P,d)
         keys = torch.cat(
             [self.tgt_key(ent_out), p_keys, self.stop_key.expand(ent_out.shape[0], 1, -1)], dim=1
@@ -574,6 +575,7 @@ class AnvilNet(nn.Module):
         src_vec = ent_out.gather(1, rows_src.unsqueeze(-1).expand(-1, -1, ent_out.shape[-1]))
         src_vec = src_vec.squeeze(1) * (choice > 0).unsqueeze(-1)
 
+        # Player keys are self-first; target picks are self-first positions.
         p_keys = self.player_key(batch["players"])
         keys = torch.cat(
             [self.tgt_key(ent_out), p_keys, self.stop_key.expand(ent_out.shape[0], 1, -1)], dim=1

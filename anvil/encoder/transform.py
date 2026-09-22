@@ -33,6 +33,35 @@ import numpy as np
 TRANSFORM_VERSION = 4  # v4 (M3 D1): cmd_tax entity scalar — commander recast
 # surcharge (2 x cmdcast) on command-zone commander rows; the obs stream has
 # carried cmdcast since D1-of-M1, the featurizer just never read it
+PLAYER_TARGET_CONVENTION = "self_first_registered_v1"
+
+
+def player_seats(perspective: int, n_players: int) -> list[int]:
+    """Return registered player indices in the model's self-first order."""
+    if n_players <= 0 or not 0 <= perspective < n_players:
+        raise ValueError(f"invalid perspective {perspective} for {n_players} players")
+    return [perspective] + [i for i in range(n_players) if i != perspective]
+
+
+def player_target_position(perspective: int, registered_player: int, n_players: int) -> int:
+    """Map a registered player ref into the model's self-first position."""
+    seats = player_seats(perspective, n_players)
+    try:
+        return seats.index(int(registered_player))
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"invalid registered player target {registered_player!r} for {n_players} players"
+        ) from e
+
+
+def require_player_target_convention(config: dict[str, Any], source: str) -> None:
+    """Reject checkpoints that do not carry the canonical target convention."""
+    actual = config.get("player_target_convention")
+    if actual != PLAYER_TARGET_CONVENTION:
+        raise ValueError(
+            f"{source} has player_target_convention={actual!r}; "
+            f"expected {PLAYER_TARGET_CONVENTION!r}; retrain from corrected labels"
+        )
 
 _VOCAB_PATH = Path(__file__).parent / "vocab_mtg.json"
 
@@ -363,7 +392,7 @@ def assemble(
     )
 
     # --- players, self first then seat order ---
-    seats = [perspective] + [i for i in range(n_players) if i != perspective]
+    seats = player_seats(perspective, n_players)
     prows = []
     for i in seats:
         p = obs["players"][i]

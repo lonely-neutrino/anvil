@@ -26,6 +26,7 @@ from anvil.encoder.transform import (
     GLOBAL_FEATURES,
     HISTORY_K,
     PLAYER_FEATURES,
+    PLAYER_TARGET_CONVENTION,
     TRANSFORM_VERSION,
 )
 from anvil.policy.model import AnvilNet
@@ -261,6 +262,7 @@ def main() -> None:
         "sa_vocab_version": 1,
         "sa_vocab_size": len(sa_vocab),
         "transform_version": TRANSFORM_VERSION,
+        "player_target_convention": PLAYER_TARGET_CONVENTION,
         "embed_meta": json.loads(Path(f"{a.embed}.json").read_text()),
     }
     del config["out"]

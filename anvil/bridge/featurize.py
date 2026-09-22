@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from anvil.encoder.transform import HISTORY_K, assemble
+from anvil.encoder.transform import HISTORY_K, assemble, player_seats
 from anvil.training.dataset import (
     COMBAT_COUNT_MAX,
     KINDS,
@@ -250,12 +250,11 @@ class Featurizer:
             # combat answer translation (D5): candidate rows in example
             # order; members per row (sorted — first-fit expansion is the
             # multiset-tie convention); attacker slots; seats maps the
-            # model's self-first player positions back to registered
-            # indices (combat heads use positions, unlike the target
-            # decoder's absolute-pi convention)
+            # model's self-first player positions back to registered indices
+            # for both combat and cast-target heads
             "cmb_rows": cmb_rows,
             "cmb_members": {r: sorted(ids) for r, ids in cmb_members.items()},
             "blk_atk_rows": blk_atk_rows,
-            "seats": [p] + [q for q in range(n_players) if q != p],
+            "seats": player_seats(p, n_players),
         }
         return ex, aux

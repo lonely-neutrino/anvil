@@ -163,6 +163,7 @@ class ModelBackend:
         import torch
 
         from anvil.bridge.featurize import Featurizer
+        from anvil.encoder.transform import require_player_target_convention
         from anvil.training.dataset import default_methods
         from anvil.training.train import build_net
 
@@ -172,6 +173,7 @@ class ModelBackend:
         # network is moved to `device` below before the weights are loaded.
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         cfg = ckpt["config"]
+        require_player_target_convention(cfg, f"checkpoint {ckpt_path}")
         # sa_vocab_size absent = pre-D2 host-level checkpoint: the model has
         # no SA descriptor and answers host_level=True (Java runs the full
         # disambiguation ladder). D2+ checkpoints name the SA themselves.
@@ -413,7 +415,11 @@ class ModelBackend:
                 if eid in aux["stack_ids"]:
                     ref.ns = 1
             else:
-                ref.player = pick - n_ent  # registered index (label convention)
+                player_pos = pick - n_ent
+                seats = aux.get("seats")
+                if not isinstance(seats, list) or not 0 <= player_pos < len(seats):
+                    raise ValueError(f"invalid self-first player target position {player_pos}")
+                ref.player = seats[player_pos]
         x = int(out["x_cls"][0])
         cp.has_x = True
         # class 17 = ">16" overflow bucket; clamp + count (decision 2026-07-10)

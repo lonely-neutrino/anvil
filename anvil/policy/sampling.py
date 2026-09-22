@@ -166,7 +166,7 @@ def pad_noise(
 ) -> dict[str, torch.Tensor]:
     """Scatter item noise into batch-padded tensors (zeros elsewhere).
 
-    Layout-aware: tgt/atk_tgt keys are [entities.. players.. (STOP)], blk keys
+    Layout-aware: tgt/atk_tgt keys are [entities.. self-first players.. (STOP)], blk keys
     are [attacker slots.. none], so the trailing columns sit at the PADDED
     offset, not the item's own.
     """

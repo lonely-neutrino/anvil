@@ -86,7 +86,13 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
-from anvil.encoder.transform import HISTORY_K, assemble, history_tokens
+from anvil.encoder.transform import (
+    HISTORY_K,
+    assemble,
+    history_tokens,
+    player_seats,
+    player_target_position,
+)
 from anvil.store.trajectories import open_store
 
 PRIORITY = "chooseSpellAbilityToPlay"
@@ -322,7 +328,7 @@ def attack_fields(
                 "derived candidate basis — superset violated (measured 0/2.23M; "
                 "run scripts/d5/measure_combat_labels.py)"
             )
-    seats = [p] + [q for q in range(n_players) if q != p]
+    seats = player_seats(p, n_players)
     out = {
         "cmb_rows": rows,
         "cmb_count": [],
@@ -570,7 +576,16 @@ class PriorityWindows(IterableDataset):
                                 tgt_kind[slot], tgt_idx[slot] = 0, row_of[ref["e"]]
                                 slot += 1
                             elif "pi" in ref:
-                                tgt_kind[slot], tgt_idx[slot] = 1, ref["pi"]
+                                try:
+                                    player_pos = player_target_position(
+                                        p, ref["pi"], len(traj.header["players"])
+                                    )
+                                except ValueError as e:
+                                    raise ValueError(
+                                        f"game {g} s={dec['s']}: invalid player target "
+                                        f"pi={ref.get('pi')!r}"
+                                    ) from e
+                                tgt_kind[slot], tgt_idx[slot] = 1, player_pos
                                 slot += 1
                             # "str" refs (non-card/player/SA oddities) are unpointable; skipped
                         tgt_kind[slot], tgt_idx[slot] = 2, 0  # STOP
@@ -699,7 +714,8 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         },
     }
     # target labels -> class ids over the padded batch: [0,n) entity rows,
-    # [n, n+p) players, n+p = STOP; -1 stays "no slot" (loss ignore_index)
+    # [n, n+p) self-first player positions, n+p = STOP; -1 stays "no slot"
+    # (loss ignore_index)
     p = batch[0]["players"].shape[0]
     kinds = torch.stack([x["tgt_kind"] for x in batch])
     idxs = torch.stack([x["tgt_idx"] for x in batch])

@@ -21,6 +21,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from anvil.encoder.transform import require_player_target_convention
 from anvil.training.dataset import TASKS, collate, default_methods
 
 
@@ -1181,6 +1182,7 @@ def main() -> None:
     dev = args.device
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
+    require_player_target_convention(cfg, f"checkpoint {args.ckpt}")
     methods = default_methods()
     n_sa = cfg.get("sa_vocab_size", 0)
     net = build_net(cfg["embed"], cfg["pool_manifest"], len(methods), n_sa=n_sa).to(dev)
@@ -1190,11 +1192,15 @@ def main() -> None:
     ref_ckpt = (
         torch.load(args.ref_ckpt, map_location="cpu", weights_only=False) if args.ref_ckpt else ckpt
     )
+    require_player_target_convention(
+        ref_ckpt["config"], f"reference checkpoint {args.ref_ckpt or args.ckpt}"
+    )
     ref.load_compat(ref_ckpt["model"])
     ref.eval()
     critic = None
     if args.critic_ckpt:
         critic_ck = torch.load(args.critic_ckpt, map_location="cpu", weights_only=False)
+        require_player_target_convention(critic_ck["config"], f"critic checkpoint {args.critic_ckpt}")
         critic = build_net(cfg["embed"], cfg["pool_manifest"], len(methods), n_sa=n_sa).to(dev)
         critic.load_compat(critic_ck["model"])
         critic.eval()
