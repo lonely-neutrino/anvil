@@ -139,6 +139,8 @@ def _start_server(
     instrument: bool = False,
     ckpt_seat1: str | None = None,
     device: str = "cuda:0",
+    max_batch: int = 16,
+    batch_window_ms: float = 3.0,
 ):
     cmd = [
         sys.executable,
@@ -154,6 +156,10 @@ def _start_server(
         "0",
         "--device",
         device,
+        "--max-batch",
+        str(max_batch),
+        "--batch-window-ms",
+        str(batch_window_ms),
     ]
     if ckpt_seat1:
         cmd += ["--ckpt-seat1", ckpt_seat1]
@@ -284,6 +290,8 @@ def _launch_games(
         str(a.workers),
         "--chunk",
         str(batch_chunk(games, a.workers, a.chunk)),
+        "--launch-delay-ms",
+        str(a.launch_delay_ms),
         "--bridge",
         f"grpc:localhost:{a.port}",
         "--obs",
@@ -896,6 +904,14 @@ def main() -> None:
     ap.add_argument("--games-per-pair", type=int, default=2)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--chunk", type=int, default=30)
+    ap.add_argument(
+        "--launch-delay-ms",
+        type=float,
+        default=0.0,
+        help="delay between worker JVM launches during generation",
+    )
+    ap.add_argument("--max-batch", type=int, default=16)
+    ap.add_argument("--batch-window-ms", type=float, default=3.0)
     ap.add_argument("--port", type=int, default=50063)
     ap.add_argument("--seed-base", type=int, required=True)
     ap.add_argument("--temperature", type=float, default=1.0)
@@ -1408,6 +1424,8 @@ def main() -> None:
                     sample=True,
                     mu_out=mu_path,
                     temperature=args.temperature,
+                    max_batch=args.max_batch,
+                    batch_window_ms=args.batch_window_ms,
                 )
                 try:
                     for j, (bp, n, off, seats) in enumerate(batches):
@@ -1922,7 +1940,12 @@ def main() -> None:
         if args.arms_every and (k + 1) % args.arms_every == 0 and args.arms_pairs:
             arm_dirs = []
             server = _start_server(
-                state["ckpt"], args.port, it_dir / "arms-server.log", sample=False
+                state["ckpt"],
+                args.port,
+                it_dir / "arms-server.log",
+                sample=False,
+                max_batch=args.max_batch,
+                batch_window_ms=args.batch_window_ms,
             )
             try:
                 for seat in (0, 1):
@@ -1943,6 +1966,8 @@ def main() -> None:
                         str(args.workers),
                         "--chunk",
                         str(batch_chunk(args.arms_games, args.workers, args.chunk)),
+                        "--launch-delay-ms",
+                        str(args.launch_delay_ms),
                         "--bridge",
                         f"grpc:localhost:{args.port}",
                         "--census",

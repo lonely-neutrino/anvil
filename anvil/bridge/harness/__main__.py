@@ -64,6 +64,12 @@ def main() -> None:
         "final_read arm did, through the D4 re-baseline).",
     )
     la.add_argument("--chunk", type=int, default=200)
+    la.add_argument(
+        "--launch-delay-ms",
+        type=float,
+        default=0.0,
+        help="delay between launching worker JVMs (execution-only startup ramp)",
+    )
     la.add_argument("--calibrated", action="store_true")
     la.add_argument(
         "--obs",

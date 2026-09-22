@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -46,7 +47,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from anvil.training.notify import notify  # noqa: E402
-from anvil.training.selfplay import RUNS_DIR, _start_server, _stop_server  # noqa: E402
+from anvil.training.selfplay import (  # noqa: E402
+    RUNS_DIR,
+    _start_server,
+    _stop_server,
+    batch_chunk,
+)
 
 CKPT = "data/training/d6-run7b/iter-014/train/last.pt"
 
@@ -59,23 +65,35 @@ def arm(
     port: int,
     seed_base: int,
     calibrated: bool = False,
+    decks: list[str] | None = None,
+    game_format: str = "Commander",
+    pool_version: str | None = None,
+    purpose_prefix: str = "genbench",
+    start_index: int = 0,
+    launch_delay_ms: float = 0.0,
 ) -> dict:
-    purpose = f"genbench-w{workers}"
+    purpose = f"{purpose_prefix}-w{workers}"
     before = set(glob.glob(str(RUNS_DIR / f"{purpose}-*")))
     cmd = [
         sys.executable,
         "-m",
         "anvil.bridge.harness",
         "launch",
-        "--pool",
+        *( ["--decks", *decks] if decks else ["--pool"] ),
+        "--format",
+        game_format,
         "--games",
         str(games),
         "--games-per-pair",
         str(gpp),
+        "--start-index",
+        str(start_index),
         "--workers",
         str(workers),
         "--chunk",
         str(chunk),
+        "--launch-delay-ms",
+        str(launch_delay_ms),
         "--bridge",
         f"grpc:localhost:{port}",
         "--obs",
@@ -86,6 +104,8 @@ def arm(
         "--seed-base",
         str(seed_base),
     ]
+    if pool_version:
+        cmd += ["--pool-version", pool_version]
     if calibrated:
         cmd.append("--calibrated")
     t0 = time.monotonic()
@@ -97,13 +117,19 @@ def arm(
     new = set(glob.glob(str(RUNS_DIR / f"{purpose}-*"))) - before
     rd = Path(new.pop()) if len(new) == 1 else None
     decisive = crashed = 0
+    statuses: dict[str, int] = {}
     if rd is not None and (rd / "games.jsonl").exists():
         for line in open(rd / "games.jsonl"):
             r = json.loads(line)
-            if r.get("status") == "won":
+            status = r.get("status", "unknown")
+            statuses[status] = statuses.get(status, 0) + 1
+            if status == "won":
                 decisive += 1
             else:
                 crashed += 1
+    summary = {}
+    if rd is not None and (rd / "summary.json").exists():
+        summary = json.loads((rd / "summary.json").read_text())
     return {
         "workers": workers,
         "ok": True,
@@ -112,8 +138,23 @@ def arm(
         "games_per_hour": round(games / elapsed * 3600, 1),
         "decisive": decisive,
         "nondecisive": crashed,
+        "statuses": statuses,
+        "summary": summary,
         "run_dir": str(rd) if rd else None,
     }
+
+
+def _pin_bridge_deadline(milliseconds: int | None) -> None:
+    if milliseconds is None:
+        return
+    key = "-Danvil.bridge.deadline.ms="
+    extra = [
+        option
+        for option in os.environ.get("ANVIL_EXTRA_JVM_OPTS", "").split()
+        if not option.startswith(key)
+    ]
+    extra.append(f"{key}{milliseconds}")
+    os.environ["ANVIL_EXTRA_JVM_OPTS"] = " ".join(extra)
 
 
 def main() -> None:
@@ -121,6 +162,11 @@ def main() -> None:
     ap.add_argument("--games", type=int, default=240)
     ap.add_argument("--workers", default="8,16")
     ap.add_argument("--games-per-pair", type=int, default=5)
+    ap.add_argument("--decks", nargs=2, default=None, metavar=("DECK0", "DECK1"))
+    ap.add_argument("--format", default="Commander")
+    ap.add_argument("--pool-version", default=None)
+    ap.add_argument("--ckpt", default=CKPT)
+    ap.add_argument("--start-index", type=int, default=0)
     ap.add_argument("--port", type=int, default=50068)
     ap.add_argument("--seed-base", type=int, default=20260726)
     ap.add_argument("--out", default="data/runs/generation-bench.json")
@@ -140,11 +186,45 @@ def main() -> None:
         "2026-08-03 '37%% slow' was the chunk-tail artifact, "
         "not nice)",
     )
+    ap.add_argument(
+        "--per-arm-clamp",
+        action="store_true",
+        help="use self-play's per-batch chunk clamp independently for each arm",
+    )
+    ap.add_argument(
+        "--restart-server-per-arm",
+        action="store_true",
+        help="restart the model server for every arm so cold-start effects are fair",
+    )
+    ap.add_argument(
+        "--bridge-deadline-ms",
+        type=int,
+        default=None,
+        help="set -Danvil.bridge.deadline.ms for Java workers",
+    )
+    ap.add_argument("--launch-delay-ms", type=float, default=0.0)
+    ap.add_argument("--max-batch", type=int, default=16)
+    ap.add_argument("--batch-window-ms", type=float, default=3.0)
+    ap.add_argument(
+        "--purpose-prefix",
+        default="genbench",
+        help="run-purpose prefix; use a unique value for each benchmark",
+    )
     a = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
     workers = [int(w) for w in a.workers.split(",")]
-    if a.chunk:
+    _pin_bridge_deadline(a.bridge_deadline_ms)
+
+    if a.per_arm_clamp:
+        if a.games < 2 * max(workers):
+            sys.exit(
+                f"--games {a.games} is too small for {max(workers)} workers "
+                "with the two-round per-arm clamp"
+            )
+        chunk = None
+        n_chunks = None
+    elif a.chunk:
         chunk = a.chunk
         n_chunks = a.games // chunk
     else:
@@ -152,47 +232,89 @@ def main() -> None:
         # measures its slowest contiguous pair-block, not throughput
         n_chunks = 2 * max(workers)
         chunk = a.games // n_chunks
-    if chunk == 0 or chunk * n_chunks != a.games:
+    if not a.per_arm_clamp and (chunk == 0 or chunk * n_chunks != a.games):
         lo = (a.games // n_chunks) * n_chunks
         good = ", ".join(str(g) for g in (lo, lo + n_chunks) if g)
         sys.exit(
             f"--games {a.games} must divide into whole chunks "
             f"({n_chunks} needed); nearby valid --games: {good}"
         )
-    if n_chunks < 2 * max(workers):
+    if not a.per_arm_clamp and n_chunks < 2 * max(workers):
         sys.exit(
             f"chunk {chunk} gives {n_chunks} chunks for {max(workers)} "
             f"workers (<2 rounds) — the tail-bound regime measures the "
             f"slowest worker, not throughput. Use a smaller --chunk."
         )
-    print(
-        f"[genbench] {a.games} games, chunk {chunk} -> {n_chunks} chunks "
-        f"({n_chunks / max(workers):.0f} rounds at widest); arms {workers}"
-    )
+    if a.per_arm_clamp:
+        print(
+            f"[genbench] {a.games} games, self-play chunk clamp, arms {workers}"
+        )
+    else:
+        print(
+            f"[genbench] {a.games} games, chunk {chunk} -> {n_chunks} chunks "
+            f"({n_chunks / max(workers):.0f} rounds at widest); arms {workers}"
+        )
 
-    server = _start_server(
-        CKPT,
-        a.port,
-        RUNS_DIR / "genbench-server.log",
-        sample=True,
-        mu_out=RUNS_DIR / "genbench-mu.jsonl",
-        temperature=1.0,
-    )
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    purpose_prefix = f"{a.purpose_prefix}-{stamp}"
+    server = None
     results = []
     try:
         for w in workers:
-            print(f"[genbench] workers={w} ...")
+            arm_chunk = (
+                batch_chunk(a.games, w, a.chunk or 30) if a.per_arm_clamp else chunk
+            )
+            print(
+                f"[genbench] workers={w}"
+                f"{', chunk=' + str(arm_chunk) if a.per_arm_clamp else ''} ..."
+            )
+            if a.restart_server_per_arm or server is None:
+                if server is not None:
+                    _stop_server(server)
+                server = _start_server(
+                    a.ckpt,
+                    a.port,
+                    RUNS_DIR / f"{purpose_prefix}-w{w}-server.log",
+                    sample=True,
+                    mu_out=RUNS_DIR / f"{purpose_prefix}-w{w}-mu.jsonl",
+                    temperature=1.0,
+                    max_batch=a.max_batch,
+                    batch_window_ms=a.batch_window_ms,
+                )
             r = arm(
-                w, a.games, chunk, a.games_per_pair, a.port, a.seed_base, calibrated=a.calibrated
+                w,
+                a.games,
+                arm_chunk,
+                a.games_per_pair,
+                a.port,
+                a.seed_base,
+                calibrated=a.calibrated,
+                decks=a.decks,
+                game_format=a.format,
+                pool_version=a.pool_version,
+                purpose_prefix=purpose_prefix,
+                start_index=a.start_index,
+                launch_delay_ms=a.launch_delay_ms,
             )
             print(f"           {r}")
             results.append(r)
     finally:
-        _stop_server(server)
+        if server is not None:
+            _stop_server(server)
 
-    Path(ROOT / a.out).write_text(
-        json.dumps({"games": a.games, "chunk": chunk, "ckpt": CKPT, "results": results}, indent=2)
-    )
+    Path(ROOT / a.out).write_text(json.dumps({
+        "games": a.games,
+        "chunk": chunk,
+        "per_arm_clamp": a.per_arm_clamp,
+        "ckpt": a.ckpt,
+        "workers": workers,
+        "bridge_deadline_ms": a.bridge_deadline_ms,
+        "launch_delay_ms": a.launch_delay_ms,
+        "max_batch": a.max_batch,
+        "batch_window_ms": a.batch_window_ms,
+        "restart_server_per_arm": a.restart_server_per_arm,
+        "results": results,
+    }, indent=2))
     print(f"[genbench] wrote {a.out}")
     ok = [r for r in results if r.get("ok")]
     if ok:

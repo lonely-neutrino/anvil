@@ -17,7 +17,8 @@ changing worker count or flags mid-run is a new run.
 Verbs (python -m anvil.bridge.harness ...):
   launch (--decks D1 D2 | --pool [--games-per-pair 5]) --games N
          [--workers 16] [--colocated] [--bridge MODE]
-         [--tags CSV] [--purpose TXT] [--seed-base X] [--chunk 200] [--calibrated]
+         [--tags CSV] [--purpose TXT] [--seed-base X] [--chunk 200]
+         [--launch-delay-ms N] [--calibrated]
   resume <run-dir>      status <run-dir>       pause <run-dir>
   replay <run-dir> <index>                     summarize <run-dir>
 """
@@ -246,6 +247,8 @@ class Run:
         inv = max([int(p.name[4:]) for p in self.workers_dir.glob("inv-*")] or [-1]) + 1
         active: list[tuple[subprocess.Popen, tuple[int, int]]] = []
         slots = self.manifest["workers"]
+        launch_delay_s = max(0.0, float(self.manifest.get("launch_delay_ms", 0.0))) / 1000.0
+        last_launch = None
         t0 = time.monotonic()
         print(
             f"[harness] {len(self.completed())}/{total} done, "
@@ -254,8 +257,11 @@ class Run:
 
         while pending or active:
             while pending and len(active) < slots and not self.stop_file.exists():
+                if last_launch is not None and launch_delay_s:
+                    time.sleep(launch_delay_s)
                 span = pending.pop(0)
                 active.append((self.launch_worker(span, inv), span))
+                last_launch = time.monotonic()
                 print(f"[harness] inv-{inv:04d} <- games [{span[0]},{span[0] + span[1]})")
                 inv += 1
             still = []
@@ -401,6 +407,7 @@ def launch(a) -> Path:
         "seed_base": a.seed_base,
         "games": a.games,
         "chunk": a.chunk,
+        "launch_delay_ms": max(0.0, a.launch_delay_ms),
         "start_index": a.start_index,
         "workers": 12 if a.colocated else a.workers,
         # ExitOnOutOfMemoryError: a batch worker must die (chunk re-issue

@@ -165,6 +165,8 @@ class ModelBackend:
         temperature: float = 1.0,
         mu_path: "str | None" = None,
         instrument: bool = False,
+        max_batch: int = 16,
+        batch_window_ms: float = 3.0,
     ):
         import torch
 
@@ -216,7 +218,15 @@ class ModelBackend:
         self.pass_delta = pass_delta
         self.device = device
         self.counts: Counter[str] = Counter()
-        self.batcher = _Batcher(self.net, torch, device, self.counts, temperature=temperature)
+        self.batcher = _Batcher(
+            self.net,
+            torch,
+            device,
+            self.counts,
+            max_batch=max_batch,
+            window_ms=batch_window_ms,
+            temperature=temperature,
+        )
         # sampling mode (M2 D6): Gumbel-max instead of argmax, behavior-policy
         # record per answered decision -> mu.jsonl, joined at ingest on (g, s)
         self.sample = sample
@@ -678,6 +688,18 @@ def main() -> None:
         "--temperature", type=float, default=1.0, help="sampling temperature (with --sample)"
     )
     ap.add_argument(
+        "--max-batch",
+        type=int,
+        default=16,
+        help="maximum GPU micro-batch size (default: 16)",
+    )
+    ap.add_argument(
+        "--batch-window-ms",
+        type=float,
+        default=3.0,
+        help="GPU micro-batch collection window in milliseconds (default: 3)",
+    )
+    ap.add_argument(
         "--mu-out", default=None, help="behavior-policy mu.jsonl path (required with --sample)"
     )
     ap.add_argument(
@@ -729,6 +751,8 @@ def main() -> None:
             temperature=args.temperature,
             mu_path=args.mu_out,
             instrument=args.fork_instrument,
+            max_batch=args.max_batch,
+            batch_window_ms=args.batch_window_ms,
         )
         if args.ckpt_seat1:
             seat_backends = {0: backend}
@@ -736,6 +760,8 @@ def main() -> None:
                 args.ckpt_seat1,
                 args.pass_delta,
                 args.device,
+                max_batch=args.max_batch,
+                batch_window_ms=args.batch_window_ms,
                 instrument=args.fork_instrument,
             )
         if args.drill_ckpt:
@@ -747,6 +773,8 @@ def main() -> None:
                 temperature=args.temperature,
                 mu_path=args.drill_mu_out,
                 instrument=args.fork_instrument,
+                max_batch=args.max_batch,
+                batch_window_ms=args.batch_window_ms,
             )
     model_backends = list(seat_backends.values()) if seat_backends else [backend]
     tags = (
