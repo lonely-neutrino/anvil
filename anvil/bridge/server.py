@@ -1380,6 +1380,10 @@ def main() -> None:
                 args.ckpt_seat1,
                 args.pass_delta,
                 args.device,
+                max_batch=args.max_batch,
+                window_ms=args.window_ms,
+                autocast=not args.no_autocast,
+                stats_every=args.stats_every,
                 instrument=args.fork_instrument,
             )
         if args.drill_ckpt:

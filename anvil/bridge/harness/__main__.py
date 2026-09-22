@@ -82,6 +82,12 @@ def main() -> None:
         help="games per worker invocation; default = ceil(games / (4 * workers)) — four rounds of refill per "
         "worker so the straggler tail is a game, not a chunk (the fleet bench 09-14); was a fixed 200",
     )
+    la.add_argument(
+        "--launch-delay-ms",
+        type=float,
+        default=0.0,
+        help="delay between launching worker JVMs (execution-only startup ramp)",
+    )
     la.add_argument("--calibrated", action="store_true")
     la.add_argument(
         "--obs",

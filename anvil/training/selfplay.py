@@ -158,6 +158,8 @@ def _start_server(
     autocast: bool = True,
     servers: int = 1,
     ckpt_seat1: str | None = None,
+    max_batch: int = 16,
+    window_ms: float = 3.0,
 ):
     cmd = [
         sys.executable,
@@ -171,6 +173,10 @@ def _start_server(
         str(port),
         "--pass-delta",
         "0",
+        "--max-batch",
+        str(max_batch),
+        "--window-ms",
+        str(window_ms),
     ]
     # the fleet week (09-14): N servers on consecutive ports behind one
     # supervisor (anvil.bridge.fleet); the launch's --bridge carries the list
@@ -597,6 +603,8 @@ def _launch_games(
         str(a.workers),
         "--chunk",
         str(batch_chunk(games, a.workers, a.chunk)),
+        "--launch-delay-ms",
+        str(a.launch_delay_ms),
         "--bridge",
         fleet_bridge(a),
         "--obs",
@@ -1327,6 +1335,14 @@ def main() -> None:
     ap.add_argument("--games-per-pair", type=int, default=2)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--chunk", type=int, default=30)
+    ap.add_argument(
+        "--launch-delay-ms",
+        type=float,
+        default=0.0,
+        help="delay between worker JVM launches during generation",
+    )
+    ap.add_argument("--max-batch", type=int, default=16)
+    ap.add_argument("--batch-window-ms", type=float, default=3.0)
     ap.add_argument("--port", type=int, default=50063)
     ap.add_argument(
         "--servers",
@@ -2106,6 +2122,8 @@ def main() -> None:
                     device=args.device,
                     autocast=not args.no_autocast,
                     servers=fleet_size(args),
+                    max_batch=args.max_batch,
+                    window_ms=args.batch_window_ms,
                 )
                 try:
                     fa = search_forge_args(args, state["ckpt"])
@@ -2760,6 +2778,8 @@ def main() -> None:
                 state["ckpt"], args.port, it_dir / "arms-server.log", sample=False,
                 sched_flags=sched_flags(args), device=args.device, autocast=not args.no_autocast,
                 servers=fleet_size(args),
+                max_batch=args.max_batch,
+                window_ms=args.batch_window_ms,
             )
             la_dirs = []
             arm_fa = search_forge_args(args, state["ckpt"]) if args.arms_lookahead == "on" else []
@@ -2784,6 +2804,8 @@ def main() -> None:
                         str(args.workers),
                         "--chunk",
                         str(batch_chunk(args.arms_games, args.workers, args.chunk)),
+                        "--launch-delay-ms",
+                        str(args.launch_delay_ms),
                         "--bridge",
                         fleet_bridge(args),
                         "--census",
