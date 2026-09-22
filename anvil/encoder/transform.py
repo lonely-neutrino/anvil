@@ -30,6 +30,8 @@ from typing import Any
 
 import numpy as np
 
+from anvil.store.castplan import ret_plans
+
 TRANSFORM_VERSION = 5  # v5 (M12 Build 4, ADR-0111): format scalars in the globals; the stack list passed through
 # (v4 (M3 D1): cmd_tax entity scalar — commander recast)
 # surcharge (2 x cmdcast) on command-zone commander rows; the obs stream has
@@ -316,14 +318,16 @@ def history_tokens(
                 d.get("_retpos") is not None and d["_retpos"] < now_pos
             )
             ret = d.get("ret") if ret_arrived else None
-            # Obs.retHostId, mirrored (09-18): the answer, or a list's first
-            # element, is a card {"e": id} or an ability {"e": host, ...};
-            # a SINGLE-entity answer is a bare dict (the served entity
-            # surfaces), which the list-only rule read as -1 against the
-            # engine's back-filled host
-            first = ret[0] if isinstance(ret, list) and ret else ret
-            if isinstance(first, dict):
-                host = first.get("e", -1)
+            if d.get("m") == "chooseSpellAbilityToPlay":
+                plans = ret_plans(ret)
+                if plans:
+                    host = plans[0].get("e", -1)
+            else:
+                # Other decision shapes may return a bare entity ref or a
+                # list of refs, but they are not CastPlans.
+                first = ret[0] if isinstance(ret, list) and ret else ret
+                if isinstance(first, dict):
+                    host = first.get("e", -1)
         out.append({"m": d.get("m", "?"), "self": 1 if actor == perspective else 0, "e": host})
     return out
 

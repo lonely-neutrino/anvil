@@ -58,6 +58,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+from anvil.store.castplan import ret_plans
+
 # ---------------------------------------------------------------- plumbing
 
 
@@ -314,8 +316,8 @@ def holding_read(store_paths: list[str]) -> dict:
                 b["spell_windows"] += 1
                 for o in spells:
                     first_cand.setdefault((seat, o["e"]), turn)
-                ret = dec.get("ret")
-                plan = ret[0] if isinstance(ret, list) and ret else None
+                plans = ret_plans(dec.get("ret"))
+                plan = plans[0] if plans else None
                 host = plan.get("e") if isinstance(plan, dict) else None
                 if host is None:
                     b["held_windows"] += 1

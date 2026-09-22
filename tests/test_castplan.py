@@ -10,6 +10,7 @@ import json
 
 import zstandard
 
+from anvil.encoder.transform import history_tokens
 from anvil.store import OBS_SCHEMA_VERSION, decode_frame, parse_ret
 from anvil.store.castplan import ValidationReport, validate_game
 from anvil.store.trajectories import GameTrajectory
@@ -76,6 +77,8 @@ def test_parse_ret_shapes():
     assert p.host == 90 and p.kind == "spell"
     assert p.optional_costs == ["Kicker1"] and p.multikicker == 0
     assert list(p.all_target_refs) == [{"e": 55}]
+    bare = parse_ret(KICKED)
+    assert bare is not None and bare[0].host == 90
     # nested modes + sub targets both feed all_target_refs
     modal = parse_ret(
         [
@@ -90,6 +93,14 @@ def test_parse_ret_shapes():
     )[0]
     assert {"pi": 0} in list(modal.all_target_refs)
     assert {"e": 55} in list(modal.all_target_refs)
+
+
+def test_history_handles_bare_priority_plan_without_parsing_other_tasks():
+    priority = {"m": "chooseSpellAbilityToPlay", "p": 0, "ret": LAND, "_retpos": 0}
+    boolean = {"m": "mulliganKeepHand", "p": 0, "ret": True, "_retpos": 1}
+    history = history_tokens([priority, boolean], perspective=0, now_pos=2)
+    assert history[0]["e"] == 70
+    assert history[1]["e"] == -1
 
 
 def test_validate_clean_game():

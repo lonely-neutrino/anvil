@@ -95,6 +95,7 @@ from anvil.encoder.transform import (
     player_target_position,
 )
 from anvil.policy.surfaces import SURF_BUILT, SURF_MAX, AbilityCache, surface_fields, surface_task
+from anvil.store.castplan import ret_plans
 from anvil.store.trajectories import open_store
 
 PRIORITY = "chooseSpellAbilityToPlay"
@@ -567,7 +568,8 @@ class PriorityWindows(IterableDataset):
                     cand_sa.append(self.sa_vocab.id(key[1]))
                     cand_kind.append(KINDS.get(o.get("kind"), KINDS["other"]))
                 if ret is not None:
-                    plan = ret[0] if isinstance(ret, list) and ret else {}
+                    plans = ret_plans(ret)
+                    plan = plans[0] if plans else {}
                     host = plan.get("e")
                     r = row_of.get(host)
                     if r is None or all(k[0] != r for k in key_of):

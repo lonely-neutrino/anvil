@@ -27,6 +27,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from anvil.store.castplan import ret_plans
 from anvil.training.dataset import TASKS, collate, default_methods
 from anvil.training.search_join import (
     FORCED_BY,
@@ -406,7 +407,7 @@ def _plan_annotate(traj, by_seat: dict, feat) -> None:
             continue
         a = acts.setdefault((p, t), {"ids": set(), "bits": [0.0, 0.0, 0.0]})
         if dec.get("m") == "chooseSpellAbilityToPlay" and dec.get("ret"):
-            for r in dec["ret"]:
+            for r in ret_plans(dec["ret"]) or []:
                 kind = r.get("kind")
                 if kind == "land":
                     a["bits"][0] = 1.0
