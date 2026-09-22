@@ -118,9 +118,22 @@ def _sleep_inhibitor(name: str) -> subprocess.Popen | None:
     return proc
 
 
-def _wait_port(port: int, timeout: float = 300.0) -> None:
+def _wait_port(
+    port: int,
+    proc: subprocess.Popen | None = None,
+    log: Path | None = None,
+    timeout: float = 300.0,
+) -> None:
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
+        if proc is not None:
+            returncode = proc.poll()
+            if returncode is not None:
+                where = f"; see {log}" if log is not None else ""
+                raise RuntimeError(
+                    f"model server exited with code {returncode} before opening "
+                    f"port {port}{where}"
+                )
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return
@@ -144,6 +157,7 @@ def _start_server(
     device: str | None = None,
     autocast: bool = True,
     servers: int = 1,
+    ckpt_seat1: str | None = None,
 ):
     cmd = [
         sys.executable,
@@ -168,6 +182,8 @@ def _start_server(
         cmd += ["--device", device]
     if not autocast:
         cmd += ["--no-autocast"]
+    if ckpt_seat1:
+        cmd += ["--ckpt-seat1", ckpt_seat1]
     if sample:
         cmd += ["--sample", "--temperature", str(temperature), "--mu-out", str(mu_out)]
     if instrument:
