@@ -116,6 +116,7 @@ GLOBAL_FEATURES = [
     # zero-pads state_proj), and the pre-registered transfer probe runs when
     # breadth actually opens.
     "fmt_commander",
+    "fmt_constructed",
 ]
 # per player, self first then opponents in seat order
 PLAYER_FEATURES = ["life", "hand_count", "library_count", "lands_played", "mana_total", "lost"]
@@ -126,7 +127,7 @@ PLAYER_FEATURES = ["life", "hand_count", "library_count", "lands_played", "mana_
 # at-chance value head (value_diag_val: AUC 0.53 flat by turns-from-end,
 # pred std ~0.015). Binary flags stay 1.
 GLOBAL_SCALE = np.array(
-    [1 / 20, 1 / 10, 1, 1, 1, 1, 1, 1 / 3] + [1.0] * 1,  # + fmt one-hot columns
+    [1 / 20, 1 / 10, 1, 1, 1, 1, 1, 1 / 3] + [1.0] * 2,  # + fmt one-hot columns
     dtype=np.float32,
 )
 PLAYER_SCALE = np.array([1 / 40, 1 / 8, 1 / 100, 1 / 4, 1 / 10, 1], dtype=np.float32)

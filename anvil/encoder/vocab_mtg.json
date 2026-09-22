@@ -5,5 +5,5 @@
              "COMBAT_DECLARE_BLOCKERS", "COMBAT_FIRST_STRIKE_DAMAGE", "COMBAT_DAMAGE",
              "COMBAT_END", "MAIN2", "END_OF_TURN", "CLEANUP"],
   "mana": ["W", "U", "B", "R", "G", "C"],
-  "formats": ["Commander"]
+  "formats": ["Commander", "Constructed"]
 }

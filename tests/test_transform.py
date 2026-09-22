@@ -243,6 +243,12 @@ def test_format_onehot_in_globals():
     assert len(out["globals"]) == len(GLOBAL_FEATURES)
     assert out["globals"][GLOBAL_FEATURES.index("fmt_commander")] == 1.0
 
+    constructed = _header()
+    constructed["fmt"] = "Constructed"
+    out_constructed = assemble(_dec([{"e": 1, "n": "Sol Ring", "z": "battlefield", "c": 0}]), constructed)
+    assert out_constructed["globals"][GLOBAL_FEATURES.index("fmt_commander")] == 0.0
+    assert out_constructed["globals"][GLOBAL_FEATURES.index("fmt_constructed")] == 1.0
+
     bad = _header()
     bad["fmt"] = "FreeForAll"
     with pytest.raises(VocabError):
