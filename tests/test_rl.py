@@ -322,6 +322,74 @@ def test_batch_chunk_guarantees_two_rounds():
     assert batch_chunk(10, 16, 30) == 1  # tiny batch floors at 1, never 0
 
 
+def test_generation_harness_args_support_fixed_constructed_pair():
+    """Custom RL runs must send the fixed Constructed pair to Forge instead
+    of silently using the repository-wide Commander pool."""
+    from argparse import Namespace
+
+    from anvil.training.selfplay import _generation_format, _generation_harness_args
+
+    args = Namespace(
+        decks=["monoGreenStompy.dck", "monoGreenStompy.dck"],
+        format="Constructed",
+        pool_format="dc",
+        pool_version="mono-green-stompy-v1",
+    )
+    assert _generation_format(args) == "Constructed"
+    assert _generation_harness_args(args) == [
+        "--decks",
+        "monoGreenStompy.dck",
+        "monoGreenStompy.dck",
+        "--format",
+        "Constructed",
+        "--pool-version",
+        "mono-green-stompy-v1",
+    ]
+
+
+def test_generation_harness_args_support_explicit_pair_schedule():
+    from argparse import Namespace
+
+    from anvil.training.selfplay import _generation_format, _generation_harness_args
+
+    args = Namespace(
+        decks=None,
+        pairs_file="data/pool/custom/constructed-four-rl-pairs.txt",
+        format="Constructed",
+        pool_format="dc",
+        pool_version="constructed-four-v1",
+    )
+    assert _generation_format(args) == "Constructed"
+    assert _generation_harness_args(args) == [
+        "--pairs-file",
+        "data/pool/custom/constructed-four-rl-pairs.txt",
+        "--format",
+        "Constructed",
+        "--pool-version",
+        "constructed-four-v1",
+    ]
+
+
+def test_generation_harness_args_preserve_pool_defaults():
+    from argparse import Namespace
+
+    from anvil.training.selfplay import _generation_format, _generation_harness_args
+
+    args = Namespace(decks=None, format=None, pool_format="dc", pool_version=None)
+    assert _generation_format(args) == "Commander"
+    assert _generation_harness_args(args) == [
+        "--pool",
+        "--pool-format",
+        "dc",
+        "--format",
+        "Commander",
+    ]
+
+    args.pool_format = "pauper"
+    assert _generation_format(args) == "Constructed"
+    assert _generation_harness_args(args)[-1] == "Constructed"
+
+
 def test_drill_slice_rotates_and_wraps():
     from anvil.training.selfplay import drill_slice
 

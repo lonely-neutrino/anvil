@@ -189,6 +189,62 @@ def batch_chunk(games: int, workers: int, chunk: int) -> int:
     return max(1, min(chunk, games // (2 * workers)))
 
 
+def _generation_format(args) -> str:
+    """Resolve the Forge format for generation.
+
+    The original self-play recipe always used the active Commander pool.  A
+    fixed deck pair is useful for small, format-specific experiments (and is
+    also how the mono-green Constructed corpus was made), so explicit decks
+    default to Constructed while the legacy pool path remains Commander.
+    """
+    fmt = getattr(args, "format", None)
+    if fmt:
+        return fmt
+    if (
+        getattr(args, "decks", None)
+        or getattr(args, "pairs_file", None)
+        or getattr(args, "pool_format", "dc") == "pauper"
+    ):
+        return "Constructed"
+    return "Commander"
+
+
+def _generation_harness_args(args) -> list[str]:
+    """Return the deck-selection arguments for a generation harness launch.
+
+    With ``--decks`` the pair is fixed, while ``--pairs-file`` supplies an
+    explicit schedule (including multi-deck schedules). Neither mode consults
+    the repository-wide pool. Without either, preserve the existing active-
+    pool behavior, including the separate Pauper/Constructed pool option.
+    """
+    decks = getattr(args, "decks", None)
+    pairs_file = getattr(args, "pairs_file", None)
+    fmt = _generation_format(args)
+    if pairs_file:
+        cmd = ["--pairs-file", str(pairs_file), "--format", fmt]
+        pool_version = getattr(args, "pool_version", None)
+        if pool_version:
+            # Explicit pair schedules have no derived pool version; allow the
+            # caller to stamp the custom embedding/deck manifest version.
+            cmd += ["--pool-version", pool_version]
+        return cmd
+    if decks:
+        cmd = ["--decks", *decks, "--format", fmt]
+        pool_version = getattr(args, "pool_version", None)
+        if pool_version:
+            # Explicit deck runs have no derived pool version; allow the
+            # caller to stamp the custom embedding/deck manifest version.
+            cmd += ["--pool-version", pool_version]
+        return cmd
+    return [
+        "--pool",
+        "--pool-format",
+        getattr(args, "pool_format", "dc"),
+        "--format",
+        fmt,
+    ]
+
+
 def _launch_games(
     purpose: str, games: int, start_index: int, a, bridge_seats: "int | None" = None
 ) -> Path:
@@ -198,7 +254,7 @@ def _launch_games(
         "-m",
         "anvil.bridge.harness",
         "launch",
-        "--pool",
+        *_generation_harness_args(a),
         "--games",
         str(games),
         "--games-per-pair",
@@ -241,7 +297,9 @@ def iteration_batches(
     h0 = n_heur // 2
     h1 = n_heur - h0
     n_mirror = games - n_heur
-    out = [(f"{name}-i{k:03d}", n_mirror, 0, None)]
+    out = []
+    if n_mirror:
+        out.append((f"{name}-i{k:03d}", n_mirror, 0, None))
     if h0:
         out.append((f"{name}-i{k:03d}h0", h0, n_mirror, 0))
     if h1:
@@ -784,6 +842,36 @@ def main() -> None:
         default="data/training/d5-combat/last.pt",
         help="iteration-0 init (delta=0 by design)",
     )
+    deck_source = ap.add_mutually_exclusive_group()
+    deck_source.add_argument(
+        "--decks",
+        nargs=2,
+        default=None,
+        metavar=("DECK0", "DECK1"),
+        help="fixed Forge deck pair for every generated game",
+    )
+    deck_source.add_argument(
+        "--pairs-file",
+        default=None,
+        help="explicit tab-separated deck-pair schedule for generated games; "
+        "one line is repeated --games-per-pair times",
+    )
+    ap.add_argument(
+        "--format",
+        default=None,
+        help="Forge GameType (default: Commander for the pool, Constructed for explicit decks/pairs)",
+    )
+    ap.add_argument(
+        "--pool-format",
+        choices=["dc", "pauper"],
+        default="dc",
+        help="active pool format when --decks is omitted: dc or pauper",
+    )
+    ap.add_argument(
+        "--pool-version",
+        default=None,
+        help="provenance version to stamp on explicit deck/pair-schedule runs",
+    )
     ap.add_argument("--iterations", type=int, required=True)
     ap.add_argument("--games", type=int, default=480, help="games per iteration")
     ap.add_argument("--games-per-pair", type=int, default=2)
@@ -1202,6 +1290,21 @@ def main() -> None:
         "--no-inhibit", action="store_true", help="skip the systemd-inhibit sleep holder"
     )
     args = ap.parse_args()
+    if args.pairs_file:
+        pairs_path = Path(args.pairs_file)
+        if not pairs_path.is_file():
+            ap.error(f"pairs file does not exist: {pairs_path}")
+        if args.games_per_pair <= 0:
+            ap.error("--games-per-pair must be positive")
+        required_pairs = (args.iterations * args.games + args.games_per_pair - 1) // args.games_per_pair
+        with pairs_path.open() as pair_stream:
+            available_pairs = sum(1 for _ in pair_stream)
+        if available_pairs < required_pairs:
+            ap.error(
+                f"pairs file has {available_pairs} lines but this run needs at least "
+                f"{required_pairs} ({args.iterations} iterations × {args.games} games ÷ "
+                f"{args.games_per_pair} games-per-pair)"
+            )
     if args.pay_drill_dir and not args.pay_drill_embed:
         ap.error("--pay-drill-dir requires --pay-drill-embed (the ckpt's embedding dir)")
     if args.drill_selection and not args.drill_replay_ckpt:
@@ -1813,12 +1916,14 @@ def main() -> None:
                         "launch",
                         "--pairs-file",
                         args.arms_pairs,
+                        "--format",
+                        _generation_format(args),
                         "--games",
                         str(args.arms_games),
                         "--workers",
                         str(args.workers),
                         "--chunk",
-                        "50",
+                        str(batch_chunk(args.arms_games, args.workers, args.chunk)),
                         "--bridge",
                         f"grpc:localhost:{args.port}",
                         "--census",
@@ -1830,6 +1935,8 @@ def main() -> None:
                         "--bridge-seats",
                         str(seat),
                     ]
+                    if getattr(args, "pool_version", None):
+                        arm_cmd += ["--pool-version", args.pool_version]
                     if args.reask:
                         arm_cmd.append("--reask")
                     _run(arm_cmd)
