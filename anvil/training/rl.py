@@ -1456,7 +1456,7 @@ def main() -> None:
     )
     ap.add_argument("--clip", type=float, default=1.0)
     ap.add_argument("--log-every", type=int, default=20)
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default="cuda:0")
     ap.add_argument(
         "--no-autocast",
         action="store_true",

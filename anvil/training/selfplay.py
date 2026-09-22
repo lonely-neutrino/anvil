@@ -1238,7 +1238,7 @@ def main() -> None:
     # the run's torch device + autocast regime, forwarded to every server the
     # driver starts and to the rl step (the Mac users' mps / cpu loop —
     # community thread 09-09; the box's default is unchanged)
-    ap.add_argument("--device", default="cuda", help="torch device for the servers + the rl step")
+    ap.add_argument("--device", default="cuda:0", help="torch device for the servers + the rl step")
     ap.add_argument(
         "--no-autocast",
         action="store_true",
@@ -1861,8 +1861,13 @@ def main() -> None:
         ap.error(f"--sched-basis hand: no ability table at {args.ability_table}")
 
     # GPU cotenancy insurance (2026-07-16 OOMs beside a resident ComfyUI):
-    # reclaims allocator fragmentation for this process and all subprocesses
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # reclaim allocator fragmentation on NVIDIA, but do not enable this
+    # CUDA allocator option on ROCm (it can make HIP allocations fail).
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        import torch
+
+        if torch.version.hip is None:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     out = Path("data/training") / args.name
     out.mkdir(parents=True, exist_ok=True)
