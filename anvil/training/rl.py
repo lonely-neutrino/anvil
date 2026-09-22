@@ -451,10 +451,11 @@ def game_trajectories(
     Returns (trajs, skip_reason): trajs = [(seat, [(ex, rec), ...], reward,
     rej, exs_fv)]; reward per §3d — win 1, loss/draw/cap 0 (a stalling leader
     forfeits the +1); skip_reason set (and trajs empty) for crash/no-outcome
-    games, whose returns are engine artifacts, and for games without mu
-    records. full_vis (§6f): exs_fv = the asymmetric critic's windows (same
-    decisions, info-set gate bypassed) — consumed ONLY by the frozen critic's
-    value forward in pass A, never by the policy passes; [] when off."""
+    games, whose returns are engine artifacts, games without mu records, and
+    undecodable observation frames. full_vis (§6f): exs_fv = the asymmetric
+    critic's windows (same decisions, info-set gate bypassed) — consumed ONLY
+    by the frozen critic's value forward in pass A, never by the policy
+    passes; [] when off."""
     from anvil.bridge.featurize import store_wire_hist
 
     mu = store.mu_for_game(g)
@@ -467,7 +468,13 @@ def game_trajectories(
     if status not in ("won", "draw"):
         return [], f"status:{status}"
     winner = store.winner_seat(g)
-    traj = store.game(g)
+    try:
+        traj = store.game(g)
+    except Exception as exc:  # noqa: BLE001
+        # A store can contain one truncated/corrupt frame from a hard-capped
+        # or killed game. Keep the reason short for aggregate metrics; the
+        # store validator provides the detailed forensic error.
+        return [], f"decode:{type(exc).__name__}"
     # M12 Build 4½ (the loop wiring, search_join): the search directive's
     # rows joined to this game's priority decs. An acted window's TWO decs
     # (the natural ask + the forced re-ask) merge into one training window
