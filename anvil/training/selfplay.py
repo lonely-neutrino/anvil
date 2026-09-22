@@ -102,9 +102,22 @@ def _sleep_inhibitor(name: str) -> subprocess.Popen | None:
     return proc
 
 
-def _wait_port(port: int, timeout: float = 300.0) -> None:
+def _wait_port(
+    port: int,
+    proc: subprocess.Popen | None = None,
+    log: Path | None = None,
+    timeout: float = 300.0,
+) -> None:
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
+        if proc is not None:
+            returncode = proc.poll()
+            if returncode is not None:
+                where = f"; see {log}" if log is not None else ""
+                raise RuntimeError(
+                    f"model server exited with code {returncode} before opening "
+                    f"port {port}{where}"
+                )
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return
@@ -124,6 +137,8 @@ def _start_server(
     drill_sample: bool = False,
     drill_mu_out: Path | None = None,
     instrument: bool = False,
+    ckpt_seat1: str | None = None,
+    device: str = "cuda:0",
 ):
     cmd = [
         sys.executable,
@@ -137,7 +152,11 @@ def _start_server(
         str(port),
         "--pass-delta",
         "0",
+        "--device",
+        device,
     ]
+    if ckpt_seat1:
+        cmd += ["--ckpt-seat1", ckpt_seat1]
     if sample:
         cmd += ["--sample", "--temperature", str(temperature), "--mu-out", str(mu_out)]
     if instrument:
@@ -153,7 +172,7 @@ def _start_server(
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     try:
-        _wait_port(port)
+        _wait_port(port, proc=proc, log=log)
     except TimeoutError:
         proc.kill()
         raise

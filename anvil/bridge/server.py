@@ -15,6 +15,12 @@ Modes:
 Run: uv run python -m anvil.bridge.server [--port 50051] [--mode echo]
      [--tags mtg.priority,mtg.mulligan_keep,...]
      [--ckpt data/training/d7-ep3/last.pt --pass-delta 0.0]
+     [--ckpt-seat1 data/training/other/last.pt]
+
+With --ckpt-seat1, --ckpt serves registered seat 0 and the second checkpoint
+serves registered seat 1. Routing uses the observation's perspective field.
+This is an argmax evaluation mode; sampled dual-policy serving is intentionally
+not enabled because a single --mu-out file cannot safely represent two policies.
 
 One bidirectional stream per worker; one outstanding request per stream by
 construction (the worker's game thread blocks), so the servicer is a plain
@@ -484,6 +490,7 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
         deadline_ms: int = 5000,
         backend: ModelBackend | None = None,
         drill_backend: ModelBackend | None = None,
+        seat_backends: dict[int, ModelBackend] | None = None,
     ):
         self.mode = mode
         self.bridged_tags = bridged_tags
@@ -494,11 +501,33 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
         # the mainline replay stays on the pinned backend — per-checkpoint
         # drill evals need the replay policy frozen to reach the fork at all.
         self.drill_backend = drill_backend
+        # Model-match mode: the bridge is shared by both registered seats, so
+        # select the policy from the observation perspective. This is kept
+        # separate from drill_backend: drill routing is keyed by fork session,
+        # while model-match routing is keyed by seat.
+        self.seat_backends = seat_backends
         self.drill_requests = 0
         self.requests_by_tag: Counter[str] = Counter()
         self.fallbacks: Counter[str] = Counter()
         self.games = 0
         self.t0 = time.monotonic()
+
+    def _backend_for(self, req: pb.DecisionRequest) -> ModelBackend | None:
+        """Choose a seat-specific policy for a normal model request.
+
+        The Java bridge carries the registered player's perspective in every
+        model observation as ``p``. Missing or malformed observations retain
+        the legacy primary-backend behavior; ModelBackend will then decline
+        the request and the existing fallback accounting remains in charge.
+        """
+        if not self.seat_backends:
+            return self.backend
+        try:
+            dec = json.loads(req.observation) if req.observation else None
+            seat = int(dec.get("p", -1)) if isinstance(dec, dict) else -1
+        except (TypeError, ValueError, json.JSONDecodeError):
+            seat = -1
+        return self.seat_backends.get(seat, self.backend)
 
     def _answer(self, req: pb.DecisionRequest, rng: random.Random) -> pb.DecisionResponse:
         if self.mode == "echo" and req.HasField("echo_answer"):
@@ -567,7 +596,9 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
                             msg.request,
                             header,
                             game_seed,
-                            self.drill_backend if use_drill else self.backend,
+                            self.drill_backend
+                            if use_drill
+                            else self._backend_for(msg.request),
                         )
                     )
                 else:
@@ -606,7 +637,10 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
         lines += [f"  {t}: {n}" for t, n in self.requests_by_tag.most_common()]
         if self.fallbacks:
             lines += [f"  FALLBACK {t}: {n}" for t, n in self.fallbacks.most_common()]
-        if self.backend is not None:
+        if self.seat_backends:
+            for seat, backend in sorted(self.seat_backends.items()):
+                lines += [f"  model seat{seat} {k}: {n}" for k, n in backend.counts.most_common()]
+        elif self.backend is not None:
             lines += [f"  model {k}: {n}" for k, n in self.backend.counts.most_common()]
         return "\n".join(lines)
 
@@ -621,6 +655,12 @@ def main() -> None:
         help=f"default: {DEFAULT_TAGS} (echo/random) or {MODEL_TAGS} (model)",
     )
     ap.add_argument("--ckpt", default="data/training/d7-ep3/last.pt")
+    ap.add_argument(
+        "--ckpt-seat1",
+        default=None,
+        help="model-match mode: checkpoint used for registered seat 1; "
+        "--ckpt remains the checkpoint for seat 0",
+    )
     ap.add_argument(
         "--pass-delta",
         type=float,
@@ -672,8 +712,14 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.ckpt_seat1 and args.mode != "model":
+        ap.error("--ckpt-seat1 requires --mode model")
+    if args.ckpt_seat1 and (args.sample or args.drill_sample):
+        ap.error("--ckpt-seat1 is argmax-only; omit --sample/--drill-sample")
+
     backend = None
     drill_backend = None
+    seat_backends = None
     if args.mode == "model":
         backend = ModelBackend(
             args.ckpt,
@@ -684,6 +730,14 @@ def main() -> None:
             mu_path=args.mu_out,
             instrument=args.fork_instrument,
         )
+        if args.ckpt_seat1:
+            seat_backends = {0: backend}
+            seat_backends[1] = ModelBackend(
+                args.ckpt_seat1,
+                args.pass_delta,
+                args.device,
+                instrument=args.fork_instrument,
+            )
         if args.drill_ckpt:
             drill_backend = ModelBackend(
                 args.drill_ckpt,
@@ -694,21 +748,30 @@ def main() -> None:
                 mu_path=args.drill_mu_out,
                 instrument=args.fork_instrument,
             )
+    model_backends = list(seat_backends.values()) if seat_backends else [backend]
     tags = (
         args.tags
         if args.tags is not None
         else (
             (
                 MODEL_TAGS
-                + ("," + COMBAT_TAGS if backend.has_combat else "")
-                + ("," + PAY_TAGS if backend.has_pay else "")
+                # The hello advertises one global tag set. In a dual-policy
+                # match, advertise optional heads only when every seat's
+                # checkpoint has them; otherwise one seat could receive a
+                # freshly initialized head rather than a trained policy.
+                + ("," + COMBAT_TAGS if all(b.has_combat for b in model_backends) else "")
+                + ("," + PAY_TAGS if all(b.has_pay for b in model_backends) else "")
             )
             if args.mode == "model"
             else DEFAULT_TAGS
         )
     )
     servicer = DecisionServicer(
-        args.mode, tags.split(","), backend=backend, drill_backend=drill_backend
+        args.mode,
+        tags.split(","),
+        backend=backend,
+        drill_backend=drill_backend,
+        seat_backends=seat_backends,
     )
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
     pb_grpc.add_DecisionBridgeServicer_to_server(servicer, server)
