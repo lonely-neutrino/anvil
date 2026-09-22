@@ -154,7 +154,7 @@ class ModelBackend:
         self,
         ckpt_path: str,
         pass_delta: float,
-        device: str = "cuda",
+        device: str = "cuda:0",
         sample: bool = False,
         temperature: float = 1.0,
         mu_path: "str | None" = None,
@@ -167,7 +167,10 @@ class ModelBackend:
         from anvil.training.train import build_net
 
         self.torch = torch
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        # Deserialize on CPU first. This avoids ROCm failures while PyTorch
+        # restores checkpoint storages directly onto the accelerator; the
+        # network is moved to `device` below before the weights are loaded.
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         cfg = ckpt["config"]
         # sa_vocab_size absent = pre-D2 host-level checkpoint: the model has
         # no SA descriptor and answers host_level=True (Java runs the full
@@ -618,7 +621,7 @@ def main() -> None:
         default=0.0,
         help="PASS-logit offset (pass_calibration.json delta; arm knob)",
     )
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default="cuda:0")
     ap.add_argument(
         "--sample",
         action="store_true",

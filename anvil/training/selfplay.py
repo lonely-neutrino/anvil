@@ -1212,8 +1212,13 @@ def main() -> None:
         ap.error("--drill-eval-set and --drill-eval-every go together")
 
     # GPU cotenancy insurance (2026-07-16 OOMs beside a resident ComfyUI):
-    # reclaims allocator fragmentation for this process and all subprocesses
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # reclaim allocator fragmentation on NVIDIA, but do not enable this
+    # CUDA allocator option on ROCm (it can make HIP allocations fail).
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        import torch
+
+        if torch.version.hip is None:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     out = Path("data/training") / args.name
     out.mkdir(parents=True, exist_ok=True)
