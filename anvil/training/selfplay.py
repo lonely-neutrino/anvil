@@ -199,6 +199,54 @@ def _stop_server(proc) -> None:
         proc.kill()
 
 
+def _merge_mu_files(dst: Path, sources: list[Path]) -> None:
+    """Combine sampled-server outputs without duplicating resumed records.
+
+    Each server writes JSONL append-only, and a resumed generation can append
+    to the same per-server file again.  The records are deterministic for a
+    given game/seed, so exact-line de-duplication preserves the existing
+    idempotent resume behavior without needing to know the mu schema here.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for path in [dst, *sources]:
+        if not path.exists():
+            continue
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if line and line not in seen:
+                seen.add(line)
+                lines.append(line)
+    if lines:
+        dst.write_text("\n".join(lines) + "\n")
+
+
+def _merge_mu_counts(dst: Path, sources: list[Path]) -> None:
+    """Sum per-server serve counters into the canonical counts sidecar."""
+    totals: dict[str, int | float] = {}
+    found = False
+    for path in sources:
+        if not path.exists():
+            continue
+        found = True
+        counts = json.loads(path.read_text())
+        for key, value in counts.items():
+            if isinstance(value, (int, float)):
+                totals[key] = totals.get(key, 0) + value
+    if found:
+        Path(str(dst) + ".counts.json").write_text(json.dumps(totals, indent=2) + "\n")
+
+
+def _model_ports(args) -> list[int]:
+    """Return the model-server ports, keeping --port as the primary port."""
+    ports = list(args.ports or [args.port])
+    if not ports or any(port <= 0 or port > 65535 for port in ports):
+        raise ValueError("model server ports must be between 1 and 65535")
+    if len(set(ports)) != len(ports):
+        raise ValueError("model server ports must be unique")
+    return ports
+
+
 def _run(cmd: list[str]) -> None:
     print(f"[selfplay] $ {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
@@ -273,6 +321,8 @@ def _generation_harness_args(args) -> list[str]:
 def _launch_games(
     purpose: str, games: int, start_index: int, a, bridge_seats: "int | None" = None
 ) -> Path:
+    ports = getattr(a, "ports", None) or [a.port]
+    bridge_flag = "--bridges" if len(ports) > 1 else "--bridge"
     before = set(glob.glob(str(RUNS_DIR / f"{purpose}-*")))
     cmd = [
         sys.executable,
@@ -292,8 +342,8 @@ def _launch_games(
         str(batch_chunk(games, a.workers, a.chunk)),
         "--launch-delay-ms",
         str(a.launch_delay_ms),
-        "--bridge",
-        f"grpc:localhost:{a.port}",
+        bridge_flag,
+        *([f"grpc:localhost:{port}" for port in ports]),
         "--obs",
         "--census",
         "--purpose",
@@ -913,6 +963,14 @@ def main() -> None:
     ap.add_argument("--max-batch", type=int, default=16)
     ap.add_argument("--batch-window-ms", type=float, default=3.0)
     ap.add_argument("--port", type=int, default=50063)
+    ap.add_argument(
+        "--ports",
+        nargs="+",
+        type=int,
+        default=None,
+        help="model-server ports for generation; workers route round-robin. "
+        "The first port is also used by auxiliary phases such as arms.",
+    )
     ap.add_argument("--seed-base", type=int, required=True)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument(
@@ -1325,6 +1383,13 @@ def main() -> None:
         "--no-inhibit", action="store_true", help="skip the systemd-inhibit sleep holder"
     )
     args = ap.parse_args()
+    try:
+        args.ports = _model_ports(args)
+    except ValueError as exc:
+        ap.error(str(exc))
+    # Keep the legacy primary-port consumers (arms, drill, campaigns) on the
+    # first configured model server when --ports is supplied.
+    args.port = args.ports[0]
     if args.pairs_file:
         pairs_path = Path(args.pairs_file)
         if not pairs_path.is_file():
@@ -1406,35 +1471,62 @@ def main() -> None:
                     break
             run_dirs.append(found)
         mu_path = it_dir / "mu.jsonl"
+        model_ports = args.ports
+        mu_sources = (
+            [it_dir / f"mu-server-{i}.jsonl" for i in range(len(model_ports))]
+            if len(model_ports) > 1
+            else [mu_path]
+        )
         walls = {"gen": 0.0, "campaign": 0.0}
 
         def _gen_track() -> None:
             t0 = time.monotonic()
             if any(rd is None for rd in run_dirs):
-                if all(rd is None for rd in run_dirs) and mu_path.exists():
-                    mu_path.unlink()  # fresh iteration: a fresh server APPENDS;
-                    # stale records from an interrupted attempt would conflict
-                    # at the merge. Partial resume KEEPS the file — completed
-                    # batches' records live there, and regenerated batches
-                    # re-emit identical rows under seeded sampling.
-                server = _start_server(
-                    state["ckpt"],
-                    args.port,
-                    it_dir / "server.log",
-                    sample=True,
-                    mu_out=mu_path,
-                    temperature=args.temperature,
-                    max_batch=args.max_batch,
-                    batch_window_ms=args.batch_window_ms,
-                )
+                if all(rd is None for rd in run_dirs):
+                    # Fresh iteration: stale records from an interrupted
+                    # attempt would conflict at the merge. Partial resume
+                    # keeps the canonical file and per-server append logs;
+                    # regenerated batches re-emit identical rows under
+                    # seeded sampling and are de-duplicated below.
+                    for path in [
+                        mu_path,
+                        *mu_sources,
+                        Path(str(mu_path) + ".counts.json"),
+                        *[Path(str(src) + ".counts.json") for src in mu_sources],
+                    ]:
+                        if path.exists():
+                            path.unlink()
+                servers = []
                 try:
+                    for i, port in enumerate(model_ports):
+                        servers.append(
+                            _start_server(
+                                state["ckpt"],
+                                port,
+                                it_dir / (
+                                    "server.log" if len(model_ports) == 1 else f"server-{i}.log"
+                                ),
+                                sample=True,
+                                mu_out=mu_sources[i],
+                                temperature=args.temperature,
+                                max_batch=args.max_batch,
+                                batch_window_ms=args.batch_window_ms,
+                            )
+                        )
                     for j, (bp, n, off, seats) in enumerate(batches):
                         if run_dirs[j] is None:
                             run_dirs[j] = _launch_games(
                                 bp, n, state["start_index"] + off, args, bridge_seats=seats
                             )
                 finally:
-                    _stop_server(server)
+                    for server in reversed(servers):
+                        _stop_server(server)
+                if len(model_ports) > 1:
+                    _merge_mu_files(mu_path, mu_sources)
+                    _merge_mu_counts(
+                        mu_path,
+                        [Path(str(source) + ".counts.json") for source in mu_sources],
+                    )
             # ---- ingest (mu joined on (g, s); disjoint start-index slices
             # make the shared mu file's game ids unambiguous across batches)
             for rd in run_dirs:

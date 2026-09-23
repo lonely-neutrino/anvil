@@ -51,9 +51,15 @@ RL_NAME="${RL_NAME:-mono-red-rl-4000-${RUN_STAMP}}"
 RL_ITERATIONS="${RL_ITERATIONS:-25}"
 RL_GAMES="${RL_GAMES:-480}"
 RL_GAMES_PER_PAIR="${RL_GAMES_PER_PAIR:-2}"
-RL_WORKERS="${RL_WORKERS:-4}"
-RL_CHUNK="${RL_CHUNK:-10}"
+RL_WORKERS="${RL_WORKERS:-12}"
+RL_CHUNK="${RL_CHUNK:-30}"
 RL_PORT="${RL_PORT:-50077}"
+# Two sampled model servers on the same GPU improved generation throughput in
+# the local benchmark. Workers are routed round-robin across these ports.
+RL_PORT_2="${RL_PORT_2:-50078}"
+RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
+RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
+RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-2000}"
 RL_SEED_BASE="${RL_SEED_BASE:-$((GEN_SEED_BASE + 1))}"
 RL_HEUR_FRAC="${RL_HEUR_FRAC:-0.5}"
 RL_ARMS_EVERY="${RL_ARMS_EVERY:-5}"
@@ -80,9 +86,11 @@ port_open() {
         >/dev/null 2>&1
 }
 
-[[ "$EVAL_PORT" != "$RL_PORT" ]] || fail "EVAL_PORT and RL_PORT must be different"
+[[ "$EVAL_PORT" != "$RL_PORT" && "$EVAL_PORT" != "$RL_PORT_2" ]] || fail "EVAL_PORT and RL ports must be different"
+[[ "$RL_PORT" != "$RL_PORT_2" ]] || fail "RL_PORT and RL_PORT_2 must be different"
 port_open "$EVAL_PORT" && fail "evaluation port $EVAL_PORT is already in use; choose another EVAL_PORT"
 port_open "$RL_PORT" && fail "RL port $RL_PORT is already in use; choose another RL_PORT"
+port_open "$RL_PORT_2" && fail "RL port $RL_PORT_2 is already in use; choose another RL_PORT_2"
 
 # ---------- red-only pool manifest ----------
 
@@ -359,6 +367,10 @@ RL_ARGS=(
     --workers "$RL_WORKERS"
     --chunk "$RL_CHUNK"
     --port "$RL_PORT"
+    --ports "$RL_PORT" "$RL_PORT_2"
+    --max-batch "$RL_MAX_BATCH"
+    --batch-window-ms "$RL_BATCH_WINDOW_MS"
+    --launch-delay-ms "$RL_LAUNCH_DELAY_MS"
     --seed-base "$RL_SEED_BASE"
     --temperature 1.0
     --replay 4

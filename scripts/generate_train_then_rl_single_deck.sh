@@ -44,6 +44,18 @@ DECK_SLUG="$(printf '%s' "$DECK_SLUG" | tr '[:upper:]' '[:lower:]' | sed -E 's/[
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 GEN_GAMES="${GEN_GAMES:-20000}"
 
+# RL generation defaults: two sampled model servers share the GPU, with the
+# harness routing workers round-robin. These remain environment-overridable
+# for machine-specific tuning; the implementation is shared with the recipe
+# script below.
+RL_WORKERS="${RL_WORKERS:-12}"
+RL_CHUNK="${RL_CHUNK:-30}"
+RL_PORT="${RL_PORT:-50077}"
+RL_PORT_2="${RL_PORT_2:-50078}"
+RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
+RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
+RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-2000}"
+
 POOL_VERSION="${POOL_VERSION:-single-deck-${DECK_SLUG}-v1}"
 POOL_MANIFEST="${POOL_MANIFEST:-data/pool/custom/${POOL_VERSION}.json}"
 EMBED="${EMBED:-data/embeddings/${POOL_VERSION}-bge-m3}"
@@ -55,5 +67,7 @@ ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/${DECK_SLUG}-pairs.txt}"
 
 export DECK DECK_DIR POOL_VERSION POOL_MANIFEST EMB GEN_GAMES
 export GEN_PURPOSE TRAIN_OUT EVAL_PREFIX RL_NAME ARMS_PAIRS
+export RL_WORKERS RL_CHUNK RL_PORT RL_PORT_2 RL_MAX_BATCH
+export RL_BATCH_WINDOW_MS RL_LAUNCH_DELAY_MS
 
 exec "$ROOT/scripts/generate_train_then_rl_mono_red.sh"
