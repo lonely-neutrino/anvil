@@ -2031,15 +2031,23 @@ def main() -> None:
         # ---- arms (argmax serve, paired seeds, both seat assignments) ----
         if args.arms_every and (k + 1) % args.arms_every == 0 and args.arms_pairs:
             arm_dirs = []
-            server = _start_server(
-                state["ckpt"],
-                args.port,
-                it_dir / "arms-server.log",
-                sample=False,
-                max_batch=args.max_batch,
-                batch_window_ms=args.batch_window_ms,
-            )
+            arm_servers = []
             try:
+                for i, port in enumerate(args.ports):
+                    arm_servers.append(
+                        _start_server(
+                            state["ckpt"],
+                            port,
+                            it_dir / (
+                                "arms-server.log"
+                                if len(args.ports) == 1
+                                else f"arms-server-{i}.log"
+                            ),
+                            sample=False,
+                            max_batch=args.max_batch,
+                            batch_window_ms=args.batch_window_ms,
+                        )
+                    )
                 for seat in (0, 1):
                     ap_purpose = f"{args.name}-arm-i{k:03d}-s{seat}"
                     before = set(glob.glob(str(RUNS_DIR / f"{ap_purpose}-*")))
@@ -2060,8 +2068,8 @@ def main() -> None:
                         str(batch_chunk(args.arms_games, args.workers, args.chunk)),
                         "--launch-delay-ms",
                         str(args.launch_delay_ms),
-                        "--bridge",
-                        f"grpc:localhost:{args.port}",
+                        "--bridges",
+                        *[f"grpc:localhost:{port}" for port in args.ports],
                         "--census",
                         "--obs",
                         "--purpose",
@@ -2079,7 +2087,8 @@ def main() -> None:
                     new = set(glob.glob(str(RUNS_DIR / f"{ap_purpose}-*"))) - before
                     arm_dirs.append(new.pop())
             finally:
-                _stop_server(server)
+                for server in reversed(arm_servers):
+                    _stop_server(server)
             _run(
                 [
                     sys.executable,

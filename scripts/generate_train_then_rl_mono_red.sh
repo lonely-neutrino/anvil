@@ -40,10 +40,19 @@ GEN_SEED_BASE="${GEN_SEED_BASE:-$(date +%Y%m%d)}"
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 GEN_PURPOSE="${GEN_PURPOSE:-mono-red-aggro-heur-${GEN_GAMES}-${RUN_STAMP}}"
 TRAIN_OUT="${TRAIN_OUT:-data/training/mono-red-aggro-bc-${RUN_STAMP}}"
+BC_STEPS="${BC_STEPS:-200000}"
+# Optional compatible BC checkpoint to reuse instead of retraining.  The
+# current model loader will graft fresh RL-only heads, including choose_color,
+# onto older checkpoints.
+BC_CKPT_INPUT="${BC_CKPT:-}"
 
 EVAL_GAMES="${EVAL_GAMES:-400}"
-EVAL_WORKERS="${EVAL_WORKERS:-4}"
+EVAL_WORKERS="${EVAL_WORKERS:-12}"
 EVAL_PORT="${EVAL_PORT:-50070}"
+EVAL_PORT_2="${EVAL_PORT_2:-50071}"
+EVAL_MAX_BATCH="${EVAL_MAX_BATCH:-16}"
+EVAL_BATCH_WINDOW_MS="${EVAL_BATCH_WINDOW_MS:-12}"
+EVAL_LAUNCH_DELAY_MS="${EVAL_LAUNCH_DELAY_MS:-2000}"
 EVAL_SEED_BASE="${EVAL_SEED_BASE:-$GEN_SEED_BASE}"
 EVAL_PREFIX="${EVAL_PREFIX:-mono-red-aggro-bc-${RUN_STAMP}}"
 
@@ -79,6 +88,9 @@ fail() {
 [[ -d "$FORGE_DIR" ]] || fail "missing Forge checkout: $FORGE_DIR"
 [[ -f "$RED_DECK" ]] || fail "missing deck: $RED_DECK"
 [[ ! -e "$TRAIN_OUT" ]] || fail "BC output already exists: $TRAIN_OUT"
+if [[ -n "$BC_CKPT_INPUT" ]]; then
+    [[ -f "$BC_CKPT_INPUT" ]] || fail "missing reusable BC checkpoint: $BC_CKPT_INPUT"
+fi
 [[ ! -e "$ROOT/data/training/$RL_NAME" ]] || fail "RL output already exists: $ROOT/data/training/$RL_NAME"
 
 port_open() {
@@ -86,9 +98,12 @@ port_open() {
         >/dev/null 2>&1
 }
 
+[[ "$EVAL_PORT" != "$EVAL_PORT_2" ]] || fail "EVAL_PORT and EVAL_PORT_2 must be different"
 [[ "$EVAL_PORT" != "$RL_PORT" && "$EVAL_PORT" != "$RL_PORT_2" ]] || fail "EVAL_PORT and RL ports must be different"
+[[ "$EVAL_PORT_2" != "$RL_PORT" && "$EVAL_PORT_2" != "$RL_PORT_2" ]] || fail "EVAL_PORT_2 and RL ports must be different"
 [[ "$RL_PORT" != "$RL_PORT_2" ]] || fail "RL_PORT and RL_PORT_2 must be different"
 port_open "$EVAL_PORT" && fail "evaluation port $EVAL_PORT is already in use; choose another EVAL_PORT"
+port_open "$EVAL_PORT_2" && fail "evaluation port $EVAL_PORT_2 is already in use; choose another EVAL_PORT_2"
 port_open "$RL_PORT" && fail "RL port $RL_PORT is already in use; choose another RL_PORT"
 port_open "$RL_PORT_2" && fail "RL port $RL_PORT_2 is already in use; choose another RL_PORT_2"
 
@@ -173,31 +188,35 @@ fi
 
 # ---------- heuristic generation ----------
 
-existing_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
-(( ${#existing_runs[@]} == 0 )) || \
-    fail "generation purpose already has run directories: $GEN_PURPOSE"
+GEN_RUN=""
+STORE=""
 
-echo "[pipeline] generating $GEN_GAMES heuristic games"
-"$PYTHON" -m anvil.bridge.harness launch \
-    --decks "$DECK" "$DECK" \
-    --format "$FORMAT" \
-    --games "$GEN_GAMES" \
-    --workers "$GEN_WORKERS" \
-    --chunk "$GEN_CHUNK" \
-    --bridge "$GEN_BRIDGE" \
-    --tags "$GEN_TAGS" \
-    --obs \
-    --census \
-    --pool-version "$POOL_VERSION" \
-    --purpose "$GEN_PURPOSE" \
-    --seed-base "$GEN_SEED_BASE"
+if [[ -z "$BC_CKPT_INPUT" ]]; then
+    existing_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
+    (( ${#existing_runs[@]} == 0 )) || \
+        fail "generation purpose already has run directories: $GEN_PURPOSE"
 
-generated_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
-(( ${#generated_runs[@]} == 1 )) || \
-    fail "expected one generated run for $GEN_PURPOSE; found ${#generated_runs[@]}"
-GEN_RUN="${generated_runs[0]}"
+    echo "[pipeline] generating $GEN_GAMES heuristic games"
+    "$PYTHON" -m anvil.bridge.harness launch \
+        --decks "$DECK" "$DECK" \
+        --format "$FORMAT" \
+        --games "$GEN_GAMES" \
+        --workers "$GEN_WORKERS" \
+        --chunk "$GEN_CHUNK" \
+        --bridge "$GEN_BRIDGE" \
+        --tags "$GEN_TAGS" \
+        --obs \
+        --census \
+        --pool-version "$POOL_VERSION" \
+        --purpose "$GEN_PURPOSE" \
+        --seed-base "$GEN_SEED_BASE"
 
-"$PYTHON" - "$GEN_RUN/summary.json" "$GEN_GAMES" <<'PY'
+    generated_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
+    (( ${#generated_runs[@]} == 1 )) || \
+        fail "expected one generated run for $GEN_PURPOSE; found ${#generated_runs[@]}"
+    GEN_RUN="${generated_runs[0]}"
+
+    "$PYTHON" - "$GEN_RUN/summary.json" "$GEN_GAMES" <<'PY'
 import json
 import sys
 
@@ -212,40 +231,50 @@ if actual != expected or skipped:
 print(f"[pipeline] generation complete: {actual} games")
 PY
 
-# ---------- ingest and validation ----------
+    # ---------- ingest and validation ----------
 
-echo "[pipeline] ingesting $GEN_RUN"
-"$PYTHON" -m anvil.store ingest \
-    "$GEN_RUN" \
-    --pool-version "$POOL_VERSION" \
-    --verify
+    echo "[pipeline] ingesting $GEN_RUN"
+    "$PYTHON" -m anvil.store ingest \
+        "$GEN_RUN" \
+        --pool-version "$POOL_VERSION" \
+        --verify
 
-STORE="$ROOT/data/trajectories/$(basename "$GEN_RUN")"
-[[ -f "$STORE/manifest.json" ]] || fail "ingest did not create $STORE/manifest.json"
+    STORE="$ROOT/data/trajectories/$(basename "$GEN_RUN")"
+    [[ -f "$STORE/manifest.json" ]] || fail "ingest did not create $STORE/manifest.json"
 
-echo "[pipeline] validating $STORE"
-"$PYTHON" -m anvil.store validate "$STORE"
+    echo "[pipeline] validating $STORE"
+    "$PYTHON" -m anvil.store validate "$STORE"
+else
+    echo "[pipeline] skipping heuristic generation and ingest (BC_CKPT supplied)"
+fi
 
-# ---------- behavior-cloning training ----------
+# ---------- behavior-cloning checkpoint ----------
 
-echo "[pipeline] training BC model into $TRAIN_OUT"
-"$PYTHON" -m anvil.training.train \
-    --store "$STORE" \
-    --embed "$EMBED" \
-    --pool-manifest "$POOL_MANIFEST" \
-    --out "$TRAIN_OUT" \
-    --batch 32 \
-    --lr 3e-4 \
-    --warmup 500 \
-    --steps 200000 \
-    --pass-weight 0.1 \
-    --workers 1 \
-    --eval-every 1000 \
-    --eval-batches 20 \
-    --final-eval-batches 100 \
-    --seed 0
+if [[ -n "$BC_CKPT_INPUT" ]]; then
+    BC_CKPT="$BC_CKPT_INPUT"
+    mkdir -p "$TRAIN_OUT"
+    echo "[pipeline] reusing compatible BC checkpoint $BC_CKPT"
+else
+    echo "[pipeline] training BC model into $TRAIN_OUT"
+    "$PYTHON" -m anvil.training.train \
+        --store "$STORE" \
+        --embed "$EMBED" \
+        --pool-manifest "$POOL_MANIFEST" \
+        --out "$TRAIN_OUT" \
+        --batch 32 \
+        --lr 3e-4 \
+        --warmup 500 \
+        --steps "$BC_STEPS" \
+        --pass-weight 0.1 \
+        --workers 1 \
+        --eval-every 100000 \
+        --eval-batches 20 \
+        --final-eval-batches 100 \
+        --seed 0
 
-BC_CKPT="$ROOT/$TRAIN_OUT/last.pt"
+    BC_CKPT="$ROOT/$TRAIN_OUT/last.pt"
+fi
+
 [[ -f "$BC_CKPT" ]] || fail "BC training did not create $BC_CKPT"
 
 # ---------- model-vs-heuristic evaluation ----------
@@ -255,42 +284,65 @@ existing_eval_runs=("$ROOT/data/runs/${EVAL_PREFIX}-"*)
     fail "evaluation prefix already has run directories: $EVAL_PREFIX"
 
 echo "[pipeline] evaluating BC checkpoint against the heuristic"
-SERVER_PID=""
+SERVER_PIDS=()
 SERVER_LOG="$TRAIN_OUT/eval-server.log"
+EVAL_PORTS=("$EVAL_PORT" "$EVAL_PORT_2")
 
 stop_eval_server() {
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-    SERVER_PID=""
+    for pid in "${SERVER_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "${SERVER_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    SERVER_PIDS=()
 }
 
 trap stop_eval_server EXIT
 trap 'stop_eval_server; exit 130' INT TERM
 
-"$PYTHON" -u -m anvil.bridge.server \
-    --mode model \
-    --ckpt "$BC_CKPT" \
-    --port "$EVAL_PORT" \
-    --device cuda:0 \
-    --pass-delta 0.0 \
-    >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
-
-ready=0
-for ((i = 0; i < 120; i++)); do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        tail -80 "$SERVER_LOG" >&2 || true
-        fail "model server exited during startup; see $SERVER_LOG"
+for i in "${!EVAL_PORTS[@]}"; do
+    eval_port="${EVAL_PORTS[$i]}"
+    if (( i == 0 )); then
+        eval_log="$SERVER_LOG"
+    else
+        eval_log="$TRAIN_OUT/eval-server-$((i + 1)).log"
     fi
-    if port_open "$EVAL_PORT"; then
-        ready=1
-        break
-    fi
-    sleep 1
+    "$PYTHON" -u -m anvil.bridge.server \
+        --mode model \
+        --ckpt "$BC_CKPT" \
+        --port "$eval_port" \
+        --device cuda:0 \
+        --pass-delta 0.0 \
+        --max-batch "$EVAL_MAX_BATCH" \
+        --batch-window-ms "$EVAL_BATCH_WINDOW_MS" \
+        >"$eval_log" 2>&1 &
+    SERVER_PIDS+=("$!")
 done
-(( ready == 1 )) || fail "model server did not open port; see $SERVER_LOG"
+
+for i in "${!EVAL_PORTS[@]}"; do
+    eval_port="${EVAL_PORTS[$i]}"
+    if (( i == 0 )); then
+        eval_log="$SERVER_LOG"
+    else
+        eval_log="$TRAIN_OUT/eval-server-$((i + 1)).log"
+    fi
+    ready=0
+    for ((wait_i = 0; wait_i < 120; wait_i++)); do
+        if ! kill -0 "${SERVER_PIDS[$i]}" 2>/dev/null; then
+            tail -80 "$eval_log" >&2 || true
+            fail "model server exited during startup; see $eval_log"
+        fi
+        if port_open "$eval_port"; then
+            ready=1
+            break
+        fi
+        sleep 1
+    done
+    (( ready == 1 )) || fail "model server did not open port; see $eval_log"
+done
 
 EVAL_RUNS=()
 run_eval() {
@@ -303,8 +355,9 @@ run_eval() {
         --games "$EVAL_GAMES" \
         --workers "$EVAL_WORKERS" \
         --chunk 10 \
+        --launch-delay-ms "$EVAL_LAUNCH_DELAY_MS" \
         --calibrated \
-        --bridge "grpc:localhost:$EVAL_PORT" \
+        --bridges "grpc:localhost:$EVAL_PORT" "grpc:localhost:$EVAL_PORT_2" \
         --bridge-seats "$seat" \
         --obs \
         --census \
@@ -407,8 +460,13 @@ fi
 echo "[pipeline] complete"
 echo "[pipeline] pool manifest: $ROOT/$POOL_MANIFEST"
 echo "[pipeline] embedding cache: $ROOT/$EMBED"
-echo "[pipeline] generated run: $GEN_RUN"
-echo "[pipeline] trajectory store: $STORE"
+if [[ -n "$GEN_RUN" ]]; then
+    echo "[pipeline] generated run: $GEN_RUN"
+    echo "[pipeline] trajectory store: $STORE"
+else
+    echo "[pipeline] generated run: skipped (BC_CKPT supplied)"
+    echo "[pipeline] trajectory store: skipped (BC_CKPT supplied)"
+fi
 echo "[pipeline] BC checkpoint: $BC_CKPT"
 echo "[pipeline] BC evaluation report: $ROOT/$BC_REPORT"
 echo "[pipeline] BC evaluation server log: $ROOT/$SERVER_LOG"
