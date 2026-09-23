@@ -142,6 +142,8 @@ class Run:
         m = self.manifest
         wdir = self.workers_dir / f"inv-{inv:04d}"
         wdir.mkdir(parents=True, exist_ok=True)
+        bridge_endpoints = m.get("bridges") or [m["bridge"]]
+        bridge = bridge_endpoints[inv % len(bridge_endpoints)]
         cmd = []
         if m["nice"]:
             cmd += ["nice", "-n", "19"]
@@ -171,7 +173,7 @@ class Run:
             "-stopfile",
             str(self.stop_file),
             "-b",
-            m["bridge"],
+            bridge,
         ]
         if m.get("tags"):
             cmd += ["-tags", m["tags"]]
@@ -418,6 +420,7 @@ def launch(a) -> Path:
         "heap": "2g",
         "jvm_opts": ["-XX:ActiveProcessorCount=2", "-XX:+ExitOnOutOfMemoryError"],
         "bridge": a.bridge,
+        "bridges": list(a.bridges) if a.bridges else [a.bridge],
         "tags": a.tags,
         "nice": not a.calibrated,
         "obs": a.obs,

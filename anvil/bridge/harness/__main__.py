@@ -51,6 +51,12 @@ def main() -> None:
     la.add_argument("--workers", type=int, default=16)
     la.add_argument("--colocated", action="store_true")
     la.add_argument("--bridge", default="local-random")
+    la.add_argument(
+        "--bridges",
+        nargs="+",
+        default=None,
+        help="multiple bridge endpoints; worker chunks are assigned round-robin",
+    )
     la.add_argument("--tags", default="")
     la.add_argument("--purpose", default="run")
     la.add_argument("--seed-base", type=int, default=None)

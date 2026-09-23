@@ -71,6 +71,7 @@ def arm(
     purpose_prefix: str = "genbench",
     start_index: int = 0,
     launch_delay_ms: float = 0.0,
+    bridges: list[str] | None = None,
 ) -> dict:
     purpose = f"{purpose_prefix}-w{workers}"
     before = set(glob.glob(str(RUNS_DIR / f"{purpose}-*")))
@@ -94,8 +95,6 @@ def arm(
         str(chunk),
         "--launch-delay-ms",
         str(launch_delay_ms),
-        "--bridge",
-        f"grpc:localhost:{port}",
         "--obs",
         "--census",
         "--reask",
@@ -104,6 +103,10 @@ def arm(
         "--seed-base",
         str(seed_base),
     ]
+    if bridges:
+        cmd += ["--bridges", *bridges]
+    else:
+        cmd += ["--bridge", f"grpc:localhost:{port}"]
     if pool_version:
         cmd += ["--pool-version", pool_version]
     if calibrated:
@@ -168,6 +171,7 @@ def main() -> None:
     ap.add_argument("--ckpt", default=CKPT)
     ap.add_argument("--start-index", type=int, default=0)
     ap.add_argument("--port", type=int, default=50068)
+    ap.add_argument("--server-ports", nargs="+", type=int, default=None)
     ap.add_argument("--seed-base", type=int, default=20260726)
     ap.add_argument("--out", default="data/runs/generation-bench.json")
     ap.add_argument(
@@ -258,6 +262,7 @@ def main() -> None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     purpose_prefix = f"{a.purpose_prefix}-{stamp}"
     server = None
+    server_ports = a.server_ports or [a.port]
     results = []
     try:
         for w in workers:
@@ -270,17 +275,22 @@ def main() -> None:
             )
             if a.restart_server_per_arm or server is None:
                 if server is not None:
-                    _stop_server(server)
-                server = _start_server(
-                    a.ckpt,
-                    a.port,
-                    RUNS_DIR / f"{purpose_prefix}-w{w}-server.log",
-                    sample=True,
-                    mu_out=RUNS_DIR / f"{purpose_prefix}-w{w}-mu.jsonl",
-                    temperature=1.0,
-                    max_batch=a.max_batch,
-                    batch_window_ms=a.batch_window_ms,
-                )
+                    for proc in server:
+                        _stop_server(proc)
+                server = []
+                for idx, server_port in enumerate(server_ports):
+                    server.append(
+                        _start_server(
+                            a.ckpt,
+                            server_port,
+                            RUNS_DIR / f"{purpose_prefix}-w{w}-server{idx}.log",
+                            sample=True,
+                            mu_out=RUNS_DIR / f"{purpose_prefix}-w{w}-server{idx}-mu.jsonl",
+                            temperature=1.0,
+                            max_batch=a.max_batch,
+                            batch_window_ms=a.batch_window_ms,
+                        )
+                    )
             r = arm(
                 w,
                 a.games,
@@ -295,12 +305,16 @@ def main() -> None:
                 purpose_prefix=purpose_prefix,
                 start_index=a.start_index,
                 launch_delay_ms=a.launch_delay_ms,
+                bridges=[f"grpc:localhost:{port}" for port in server_ports]
+                if len(server_ports) > 1
+                else None,
             )
             print(f"           {r}")
             results.append(r)
     finally:
         if server is not None:
-            _stop_server(server)
+            for proc in server:
+                _stop_server(proc)
 
     Path(ROOT / a.out).write_text(json.dumps({
         "games": a.games,
@@ -313,6 +327,7 @@ def main() -> None:
         "max_batch": a.max_batch,
         "batch_window_ms": a.batch_window_ms,
         "restart_server_per_arm": a.restart_server_per_arm,
+        "server_ports": server_ports,
         "results": results,
     }, indent=2))
     print(f"[genbench] wrote {a.out}")
