@@ -29,6 +29,8 @@ import torch
 from anvil.encoder.transform import HISTORY_K, assemble, player_seats
 from anvil.store.castplan import ret_plans
 from anvil.training.dataset import (
+    COLOR_CLASSES,
+    color_class,
     COMBAT_COUNT_MAX,
     KINDS,
     PAY_KINDS,
@@ -71,6 +73,7 @@ TAG_TASK = {
     "mtg.surface.order": "surf_order",
     "mtg.surface.damage": "surf_damage",
     "mtg.surface.target": "surf_target",  # Build 4
+    "mtg.choose_color": "choose_color",
 }
 
 
@@ -303,6 +306,8 @@ class Featurizer:
         cand_first_opt = [-1]  # per candidate: FIRST matching wire-option index
         ctx_row = -1
         num_lo, num_hi = 0, X_CLASSES - 1
+        color_mask = [True] * COLOR_CLASSES
+        color_first_opt = [-1] * COLOR_CLASSES
         cmb_rows: list[int] = []
         cmb_count: list[int] = []
         blk_atk_rows: list[int] = []
@@ -355,6 +360,25 @@ class Featurizer:
                 rows_set = [row_of.get(e, -1) for e in sorted(ents)][:PAY_SET_K]
                 cand_ents.append(rows_set + [-1] * (PAY_SET_K - len(rows_set)))
                 cand_first_opt.append(i)
+        elif task == "choose_color":
+            # Color choices are a fixed WUBRG class space with a per-window
+            # legal-option mask.  The bridge still speaks in option indices;
+            # first-fit mapping preserves that wire contract if a malformed
+            # request repeats a color label.
+            color_mask = [False] * COLOR_CLASSES
+            for i, label in enumerate(dec.get("opts") or []):
+                c = color_class(label)
+                if c is None:
+                    continue
+                color_mask[c] = True
+                if color_first_opt[c] < 0:
+                    color_first_opt[c] = i
+            # A malformed/legacy observation must not create an all-masked
+            # categorical distribution.  The server rejects it and the
+            # worker uses its local echo; the model-side fallback is only for
+            # shape-safe batching and never authorizes an illegal wire pick.
+            if not any(color_mask):
+                color_mask = [True] * COLOR_CLASSES
         elif task == "trigger":
             m = _HOST_ID.search(args.get("host") or "")
             if m and int(m.group(1)) in row_of:
@@ -438,6 +462,8 @@ class Featurizer:
             "num_label": torch.tensor(-1, dtype=torch.int64),
             "num_lo": torch.tensor(num_lo, dtype=torch.int64),
             "num_hi": torch.tensor(num_hi, dtype=torch.int64),
+            "color_mask": torch.tensor(color_mask, dtype=torch.bool),
+            "color_label": torch.tensor(-1, dtype=torch.int64),
             "ctx_row": torch.tensor(ctx_row, dtype=torch.int64),
             "forced": torch.tensor(0, dtype=torch.int64),
             "has_outcome": torch.tensor(0, dtype=torch.int64),
@@ -486,5 +512,7 @@ class Featurizer:
             "blk_atk_rows": blk_atk_rows,
             "seats": player_seats(p, n_players),
             **aux_sched,
+            "color_first_opt": color_first_opt,
+            "color_options_valid": any(v >= 0 for v in color_first_opt),
         }
         return ex, aux

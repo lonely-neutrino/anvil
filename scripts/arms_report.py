@@ -39,6 +39,8 @@ def aggregate(run_dirs: list[Path]) -> dict:
     rungs = Counter()
     vetoes = Counter()
     mull = Counter()
+    colors = Counter()
+    ignored_target_refs = 0
 
     for rd in run_dirs:
         # NB: in pure-heuristic runs every seat is named "Anvil(n)-deck";
@@ -84,6 +86,7 @@ def aggregate(run_dirs: list[Path]) -> dict:
                         copy_prio["cast"] += 1
                     continue
                 if m == PRIORITY and r.get("by") == "bridge":
+                    ignored_target_refs += int(bool(r.get("ignoredTargets")))
                     if r.get("veto"):
                         vetoes[
                             r.get("veto") if isinstance(r["veto"], str) else r.get("reason", "veto")
@@ -102,6 +105,10 @@ def aggregate(run_dirs: list[Path]) -> dict:
                             prio["first_cast"] += 1
                 elif m == "mulliganKeepHand" and r.get("by") == "bridge":
                     mull[str(r.get("keep")).lower()] += 1
+                elif m == "chooseColor" and r.get("by") == "bridge":
+                    color = r.get("color") or r.get("pick")
+                    if color:
+                        colors[str(color)] += 1
 
     out = {
         "runs": [str(r) for r in run_dirs],
@@ -114,8 +121,11 @@ def aggregate(run_dirs: list[Path]) -> dict:
         "vetoes": dict(vetoes),
         "rungs": dict(rungs),
         "mulligan_keep": dict(mull),
+        "choose_color": {"count": sum(colors.values()), "colors": dict(colors)},
+        "ignored_target_refs": ignored_target_refs,
     }
     n_veto = sum(vetoes.values())
+    out["no_shape_fit_vetoes"] = vetoes["no_shape_fit"]
     out["veto_rate"] = n_veto / max(prio["cast"] + n_veto, 1)
     out["copy_priority"] = dict(copy_prio)
     out["copy_veto_rate"] = copy_prio["veto"] / max(copy_prio["cast"] + copy_prio["veto"], 1)

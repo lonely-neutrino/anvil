@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from anvil.store.castplan import ret_plans
-from anvil.training.dataset import TASKS, collate, default_methods
+from anvil.training.dataset import COLOR_CLASSES, TASKS, collate, default_methods
 from anvil.training.search_join import (
     FORCED_BY,
     acted_override,
@@ -84,6 +84,7 @@ def composite_logp(fwd: dict, batch: dict, temperature: float = 1.0) -> dict:
     b_sign = torch.where(batch["bool_label"].clamp(min=0) > 0, b, -b)
     lp_bool = F.logsigmoid(b_sign) * b_ok.float()
     lp_num = _gather_lp(fwd["num_logits"], batch["num_label"], temperature)
+    lp_color = _gather_lp(fwd["color_logits"], batch["color_label"], temperature)
 
     a = fwd["atk_logits"].float() / temperature
     a_ok = batch["atk_label"] >= 0
@@ -93,7 +94,18 @@ def composite_logp(fwd: dict, batch: dict, temperature: float = 1.0) -> dict:
     lp_atgt = _gather_lp(fwd["atk_tgt_logits"], batch["atk_tgt_labels"], temperature).sum(-1)
     lp_blk = _gather_lp(fwd["blk_logits"], batch["blk_label"], temperature).sum(-1)
 
-    total = lp_choice + lp_tgt + lp_x + lp_bool + lp_num + lp_atk + lp_cnt + lp_atgt + lp_blk
+    total = (
+        lp_choice
+        + lp_tgt
+        + lp_x
+        + lp_bool
+        + lp_num
+        + lp_color
+        + lp_atk
+        + lp_cnt
+        + lp_atgt
+        + lp_blk
+    )
     return {
         "logp": total,
         "choice": lp_choice,
@@ -101,6 +113,7 @@ def composite_logp(fwd: dict, batch: dict, temperature: float = 1.0) -> dict:
         "x": lp_x,
         "bool": lp_bool,
         "num": lp_num,
+        "color": lp_color,
         "atk": lp_atk,
         "cnt": lp_cnt,
         "atgt": lp_atgt,
@@ -117,6 +130,9 @@ def apply_mu_labels(ex: dict, rec: dict) -> dict:
 
     n_i = ex["entities"].shape[0]
     task = rec["task"]
+    if task == "choose_color":
+        ex["color_label"] = torch.tensor(rec["c"], dtype=torch.int64)
+        return ex
     if task == "pay_class":
         # choice-only (M9 rung 3): the goal pick IS the whole answer
         ex["label"] = torch.tensor(rec["c"], dtype=torch.int64)
@@ -183,6 +199,7 @@ def composite_entropy(fwd: dict, batch: dict) -> torch.Tensor:
     bent = -(p * F.logsigmoid(b) + (1 - p) * F.logsigmoid(-b))
     ent = ent + bent * (batch["bool_label"] >= 0).float()
     ent = ent + cat_ent(fwd["num_logits"], batch["num_label"] >= 0)
+    ent = ent + cat_ent(fwd["color_logits"], batch["color_label"] >= 0)
 
     a = fwd["atk_logits"].float()
     pa = torch.sigmoid(a)
@@ -247,6 +264,10 @@ def mu_matches(ex: dict, rec: dict) -> bool:
     n_i = ex["entities"].shape[0]
     p = ex["players"].shape[0]
     task = rec["task"]
+    if task == "choose_color":
+        c = int(rec["c"])
+        mask = ex.get("color_mask")
+        return 0 <= c < COLOR_CLASSES and mask is not None and bool(mask[c])
     if task == "pay_class":
         return 0 <= rec["c"] < ex["cand_rows"].shape[0]
     if task == "priority":

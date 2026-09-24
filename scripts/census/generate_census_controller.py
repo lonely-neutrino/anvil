@@ -40,6 +40,15 @@ NAME_TYPES = {"SpellAbility", "Card", "Player", "GameEntity", "WrappedAbility"}
 # label has a logged legality basis (replay drift forbids recomputing it later).
 DEC_OVERRIDES = {
     "chooseSpellAbilityToPlay": "Obs.decPriority(getGame(), getPlayer())",
+    "chooseColor":
+        'Obs.decWithOptions(getGame(), getPlayer(), "chooseColor", '
+        'Obs.colorOptions(colors), "message", message, "sa", Census.str(sa))',
+}
+
+# Color masks are bytes in Forge, but the observation schema should carry the
+# canonical class label rather than Java's numeric byte representation.
+RET_OVERRIDES = {
+    "chooseColor": "Obs.ret(getGame(), __s, MagicColor.toLongString(__r))",
 }
 
 # M9 D3: methods whose CENSUS record routes through a hand-owned helper (the
@@ -64,14 +73,6 @@ FORCE_OVERRIDES = {
         "ChoiceDirective.forceZoneChange(getGame(), getPlayer(), fetchList, sa, selectPrompt)",
     "payCostToPreventEffect":
         "ChoiceDirective.forcePrevent(getGame(), getPlayer(), cost, sa)",
-    # M10 cousins touch (2026-08-28): directed cousin commitments — the
-    # payment window owner arms CousinDirective around the auto-completion;
-    # unarmed (null) = natural heuristic play (ADR-0025 identity direction).
-    "chooseCardsForConvokeOrImprovise":
-        "CousinDirective.forceConvokeOrImprovise(getGame(), getPlayer(), sa,"
-        " untappedCards, artifacts, creatures)",
-    "chooseCardsToDelve":
-        "CousinDirective.forceDelve(getGame(), getPlayer(), grave)",
 }
 
 
@@ -314,7 +315,7 @@ def main() -> None:
                 f"{force}"
                 f"        {ret} __r = super.{name}({call_args});\n"
                 f"{after}"
-                f"        Obs.ret(getGame(), __s, __r);\n"
+                f"        {RET_OVERRIDES.get(name, 'Obs.ret(getGame(), __s, __r)')};\n"
                 f"        return __r;\n"
             )
         body.append(
@@ -339,6 +340,7 @@ def main() -> None:
         "forge.game.Game",
         "forge.game.player.Player",
         "forge.LobbyPlayer",
+        "forge.card.MagicColor",
     ]
     kept = []
     for imp in imports:

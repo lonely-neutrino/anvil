@@ -132,7 +132,7 @@ class AnvilNet(nn.Module):
         # representation, fed by the value loss).
         self.value_stopgrad = False
         # target decoder (rung 1, autoregressive over T_MAX+1 slots incl. STOP)
-        from anvil.training.dataset import T_MAX, TASKS, X_CLASSES
+        from anvil.training.dataset import COLOR_CLASSES, T_MAX, TASKS, X_CLASSES
 
         self.t_max = T_MAX
         self.tgt_query = nn.Linear(3 * d_model, d_model)
@@ -183,6 +183,14 @@ class AnvilNet(nn.Module):
         self.num_head = nn.Sequential(
             nn.Linear(2 * d_model + 64, d_model), nn.GELU(), nn.Linear(d_model, X_CLASSES)
         )
+        # RL-only single-color choice.  The legal-color mask is supplied by
+        # the callback's option list; zero-init the output projection so a
+        # freshly grafted head samples uniformly over legal WUBRG choices.
+        self.color_head = nn.Sequential(
+            nn.Linear(2 * d_model + 64, d_model), nn.GELU(), nn.Linear(d_model, COLOR_CLASSES)
+        )
+        nn.init.zeros_(self.color_head[-1].weight)
+        nn.init.zeros_(self.color_head[-1].bias)
         # combat heads (M2 D5): factorized per-candidate-row declarations.
         # Row input = candidate entity output ⊕ [STATE]. Param names keep the
         # atk_/blk_/cmb_ prefixes — load_compat lets pre-D5 checkpoints load
@@ -346,6 +354,7 @@ class AnvilNet(nn.Module):
         "blk_",
         "cmb_",
         "pay_",
+        "color_",
         "plan_",
         "assemble.plan_proj.",
         "sched_",
@@ -833,6 +842,8 @@ class AnvilNet(nn.Module):
         num_logits = num_logits.masked_fill(
             (rng < batch["num_lo"].unsqueeze(-1)) | (rng > batch["num_hi"].unsqueeze(-1)), -1e9
         )
+        color_logits = self.color_head(of_in)
+        color_logits = color_logits.masked_fill(~batch["color_mask"].bool(), -1e9)
 
         out_dict = {
             "policy_logits": logits,
@@ -840,6 +851,7 @@ class AnvilNet(nn.Module):
             "x_logits": x_logits,
             "bool_logit": bool_logit,
             "num_logits": num_logits,
+            "color_logits": color_logits,
             "plan": plan,
             "value_logit": self.value_head(
                 state.detach() if self.value_stopgrad else state
@@ -991,6 +1003,8 @@ class AnvilNet(nn.Module):
         num_logits = num_logits.masked_fill(
             (rng < batch["num_lo"].unsqueeze(-1)) | (rng > batch["num_hi"].unsqueeze(-1)), -1e9
         )
+        color_logits = self.color_head(of_in)
+        color_logits = color_logits.masked_fill(~batch["color_mask"].bool(), -1e9)
 
         cmb = self._combat_outputs(state, ent_out, batch)
         sched: dict = {}
@@ -1026,6 +1040,7 @@ class AnvilNet(nn.Module):
             "stop_idx": stop_idx,
             "bool": bern_pick(self.bool_head(of_in).squeeze(-1), noise and noise["bool"], "bool"),
             "num": cat_pick(num_logits, noise and noise["num"], "num"),
+            "color": cat_pick(color_logits, noise and noise["color"], "color"),
             "win": torch.sigmoid(self.value_head(state).squeeze(-1)),
             # combat picks (D5): per-row attack yes/no, group count k
             # (count-class argmax + 1), target class over [0,N)∪[N,N+P),
