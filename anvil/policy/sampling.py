@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from anvil.bridge.harness.seeds import GOLDEN, MASK, splitmix64
-from anvil.training.dataset import COMBAT_COUNT_MAX, T_MAX, X_CLASSES
+from anvil.training.dataset import COLOR_CLASSES, COMBAT_COUNT_MAX, T_MAX, X_CLASSES
 
 # heads sampled per task; draw order within a task is FIXED (determinism)
 _TASK_HEADS = {
@@ -32,6 +32,9 @@ _TASK_HEADS = {
     "block": ("blk", "cnt"),
     # M9 rung 3: the payment goal decision is choice-only — no targets, no X
     "pay_class": ("choice",),
+    # M11: fixed WUBRG categorical choice, masked by the callback's legal
+    # option list.
+    "choose_color": ("color",),
 }
 
 
@@ -74,6 +77,7 @@ def make_noise(
         "cnt": lambda: gumbel(a, COMBAT_COUNT_MAX),
         "atk_tgt": lambda: gumbel(a, n + p),
         "blk": lambda: gumbel(a, m + 1),
+        "color": lambda: gumbel(COLOR_CLASSES),
     }
     return {h: shapes[h]() for h in _TASK_HEADS[task]}
 
@@ -124,6 +128,10 @@ def mu_record(g: int, s: int, task: str, ex: dict, aux: dict, out: dict) -> dict
         rec["c"] = int(out["choice"][0])
         lp["choice"] = float(out["logp_choice"][0])
         ent["choice"] = float(out["ent_choice"][0])
+    elif task == "choose_color":
+        rec["c"] = int(out["color"][0])
+        lp["color"] = float(out["logp_color"][0])
+        ent["color"] = float(out["ent_color"][0])
     elif task in ("mull_keep", "trigger", "binary"):
         rec["b"] = int(bool(out["bool"][0]))
         lp["bool"] = float(out["logp_bool"][0])
@@ -186,6 +194,7 @@ def pad_noise(
         "cnt": torch.zeros(b, a, COMBAT_COUNT_MAX),
         "atk_tgt": torch.zeros(b, a, n + p),
         "blk": torch.zeros(b, a, m + 1),
+        "color": torch.zeros(b, COLOR_CLASSES),
     }
     for i, nz in enumerate(noises):
         if "choice" in nz:
@@ -214,4 +223,6 @@ def pad_noise(
             mi = ki - 1
             out["blk"][i, :ai, :mi] = nz["blk"][:, :mi]
             out["blk"][i, :ai, m] = nz["blk"][:, mi]
+        if "color" in nz:
+            out["color"][i] = nz["color"]
     return {k: v.to(device) for k, v in out.items()}

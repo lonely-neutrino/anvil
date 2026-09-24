@@ -47,8 +47,8 @@ from anvil.bridge.pb import anvil_bridge_pb2 as pb
 from anvil.bridge.pb import anvil_bridge_pb2_grpc as pb_grpc
 
 PROTOCOL_VERSION = 0
-DEFAULT_TAGS = "mtg.priority,mtg.mulligan_keep,mtg.mulligan_tuck,mtg.trigger,mtg.binary,mtg.number"
-MODEL_TAGS = "mtg.priority,mtg.mulligan_keep,mtg.trigger,mtg.binary,mtg.number"
+DEFAULT_TAGS = "mtg.priority,mtg.mulligan_keep,mtg.mulligan_tuck,mtg.trigger,mtg.binary,mtg.number,mtg.choose_color"
+MODEL_TAGS = "mtg.priority,mtg.mulligan_keep,mtg.trigger,mtg.binary,mtg.number,mtg.choose_color"
 # advertised only when the checkpoint carries TRAINED combat heads —
 # load_compat fresh-inits them for pre-D5 checkpoints, which must never serve
 COMBAT_TAGS = "mtg.attack,mtg.block"
@@ -364,6 +364,31 @@ class ModelBackend:
                 if v != n:
                     self.counts["num_clamped"] += 1
                 resp.value = v
+        elif task == "choose_color":
+            # The model predicts a canonical WUBRG class; the worker expects
+            # the index in the callback's legal-option list.  Reject any
+            # malformed observation or mismatched request so GrpcBridge uses
+            # its deterministic local echo instead of returning an illegal
+            # color.
+            c = int(out["color"][0])
+            first = aux.get("color_first_opt", [])
+            if not aux.get("color_options_valid") or not (0 <= c < len(first)):
+                self.counts["color_invalid"] += 1
+                return None
+            option = first[c]
+            if option < 0 or option >= len(req.options):
+                self.counts["color_invalid"] += 1
+                return None
+            from anvil.training.dataset import color_class
+
+            label_class = color_class(req.options[option].label)
+            if label_class is None:
+                self.counts["color_invalid"] += 1
+                return None
+            if label_class != c:
+                self.counts["color_invalid"] += 1
+                return None
+            resp.index = option
         return resp
 
     def _plan_inject(self, ex: dict, header: dict, dec: dict) -> tuple:

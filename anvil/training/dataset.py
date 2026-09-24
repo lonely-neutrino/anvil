@@ -99,6 +99,16 @@ from anvil.store.trajectories import open_store
 PRIORITY = "chooseSpellAbilityToPlay"
 T_MAX = 4  # target slots (100% coverage measured on the pilot; +1 STOP slot)
 X_CLASSES = 18  # X = 0..16 + overflow bucket (3 casts past 16 in a 106K sample)
+COLOR_NAMES = ("white", "blue", "black", "red", "green")
+COLOR_CLASSES = len(COLOR_NAMES)
+COLOR_INDEX = {name: i for i, name in enumerate(COLOR_NAMES)}
+COLOR_ALIASES = {"w": "white", "u": "blue", "b": "black", "r": "red", "g": "green"}
+
+
+def color_class(label: object) -> int | None:
+    """Return the canonical WUBRG class for a wire label, if recognized."""
+    name = str(label).strip().lower()
+    return COLOR_INDEX.get(COLOR_ALIASES.get(name, name))
 
 # one-field tasks (rung-1 committed scope beside priority; m1-bc-plan D4).
 # Measured per 300 pilot games: mull_keep 746 / mull_tuck 146 / trigger 3,071
@@ -134,6 +144,10 @@ TASKS = {
     # mask). Certified-outcome provenance ≠ heuristic provenance; the
     # BC corpus loader path here remains payment-blind.
     "pay_class": 8,
+    # M11 single-color choice: RL-only, like pay_class.  Heuristic color
+    # answers are deliberately not admitted through TASK_OF_METHOD because
+    # the heuristic is not a trustworthy teacher for Brave the Elements.
+    "choose_color": 9,
 }
 
 # M9 rung 3: goal-kind codes for payment options (the "gk" field the fork
@@ -649,6 +663,8 @@ class PriorityWindows(IterableDataset):
                 "num_label": torch.tensor(num_label, dtype=torch.int64),
                 "num_lo": torch.tensor(num_lo, dtype=torch.int64),
                 "num_hi": torch.tensor(num_hi, dtype=torch.int64),
+                "color_mask": torch.ones(COLOR_CLASSES, dtype=torch.bool),
+                "color_label": torch.tensor(-1, dtype=torch.int64),
                 "ctx_row": torch.tensor(ctx_row, dtype=torch.int64),
                 "forced": torch.tensor(forced, dtype=torch.int64),
                 "has_outcome": torch.tensor(has_outcome, dtype=torch.int64),
@@ -715,6 +731,15 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
             for k in ("task", "bool_label", "num_label", "num_lo", "num_hi", "ctx_row", "forced")
         },
     }
+    out["color_mask"] = torch.stack(
+        [
+            x.get("color_mask", torch.ones(COLOR_CLASSES, dtype=torch.bool)).bool()
+            for x in batch
+        ]
+    )
+    out["color_label"] = torch.stack(
+        [x.get("color_label", torch.tensor(-1, dtype=torch.int64)) for x in batch]
+    )
     # target labels -> class ids over the padded batch: [0,n) entity rows,
     # [n, n+p) self-first player positions, n+p = STOP; -1 stays "no slot"
     # (loss ignore_index)
