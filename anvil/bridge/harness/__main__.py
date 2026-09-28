@@ -170,6 +170,12 @@ def main() -> None:
         "timing per completion, never forces); requires "
         "--force-seq",
     )
+    la.add_argument(
+        "--force-candidate-file",
+        type=Path,
+        default=None,
+        help="candidate target TSV for labels-only natural/forced rollouts",
+    )
 
     for name in ("resume", "pause", "status", "summarize"):
         p = sub.add_parser(name)

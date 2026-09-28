@@ -486,6 +486,14 @@ def game_trajectories(
             # verbatim — the first windows' history includes parent-game
             # entries a reconstruction from this frame could never see
             ex, aux = feat.example(wire, traj.header, rec["task"])
+            if rec["task"] == "priority":
+                # Candidate-drill joins use the public (entity, normalized SA)
+                # identity, not the transient dedup row number.  Keep this
+                # loader-private side channel on the natural fork example;
+                # it is removed nowhere in the model path and is ignored by
+                # collate/forward.
+                ex["_candidate_keys"] = aux.get("candidate_keys", [])
+                ex["_candidate_key_aliases"] = aux.get("candidate_key_aliases", [])
             if not mu_matches(ex, rec):
                 return [], "mu_mismatch"
             rej = rejected_events(
@@ -578,6 +586,71 @@ def seq_pass(
         tot_l += float(l_seq.detach())
         tot_aux += float(aux.detach())
     return tot_l, tot_aux
+
+
+def candidate_pass(
+    net,
+    candidate_segs: list,
+    forward_segments,
+    w_candidate: float,
+    grad: bool = True,
+    margin: float = 0.0,
+) -> float:
+    """Apply the signed counterfactual candidate contrast.
+
+    Each segment contains exactly one non-PASS target per row.  The forced
+    trajectory is a labels-only intervention, so this term reads only the
+    natural window's policy logits and never touches V-trace ``mu`` records.
+    ``margin`` bounds the log-probability contrast in the same way as the
+    existing C-sequence term.
+    """
+    n_total = sum(next(iter(s.values())).shape[0] for s in candidate_segs)
+    total = 0.0
+    for seg, fwd in forward_segments(net, candidate_segs, grad=grad):
+        lp = fwd["policy_logits"].float().log_softmax(1)
+        mask = seg["candidate_tmask"].bool()
+        if mask.shape != lp.shape:
+            raise ValueError(
+                f"candidate target mask shape {tuple(mask.shape)} != policy logits {tuple(lp.shape)}"
+            )
+        contrast = lp.masked_fill(~mask, -1e9).logsumexp(1) - lp[:, 0]
+        if margin > 0:
+            contrast = contrast.clamp(-margin, margin)
+        weight = seg.get("candidate_weight")
+        if weight is None:
+            weight = torch.ones_like(seg["candidate_adv"])
+        loss = -(seg["candidate_adv"] * weight * contrast).sum() / max(n_total, 1)
+        if grad:
+            (w_candidate * loss).backward()
+        total += float(loss.detach())
+    return total
+
+
+def candidate_policy_stats(net, ref, candidate_segs, forward_segments) -> dict:
+    """Measure policy drift on the candidate windows against the source ckpt."""
+    if not candidate_segs:
+        return {}
+    was_training = net.training
+    net.eval()
+    ref.eval()
+    totals = {"kl": 0.0, "pass_drift": 0.0, "candidate_mass": 0.0, "n": 0}
+    try:
+        for seg, fwd in forward_segments(net, candidate_segs, grad=False):
+            ref_fwd = next(forward_segments(ref, [seg], grad=False))[1]
+            lp = fwd["policy_logits"].float().log_softmax(1)
+            lq = ref_fwd["policy_logits"].float().log_softmax(1)
+            p = lp.exp()
+            q = lq.exp()
+            mask = seg["candidate_tmask"].bool()
+            totals["kl"] += float((p * (lp - lq)).sum().detach())
+            totals["pass_drift"] += float((p[:, 0] - q[:, 0]).abs().sum().detach())
+            totals["candidate_mass"] += float((p * mask).sum().detach())
+            totals["n"] += int(p.shape[0])
+    finally:
+        if was_training:
+            net.train()
+    n = max(totals.pop("n"), 1)
+    return {f"candidate_{key}": value / n for key, value in totals.items()}
 
 
 def entropy_hinge(ent: "torch.Tensor", floor: float, b: int, t_len: int):
@@ -1186,6 +1259,31 @@ def main() -> None:
         help="weight on the C2a masked-head aux BCE toward wr_nat at "
         "fork windows (mirrors --value-weight's scale)",
     )
+    # ---- generic counterfactual priority-candidate drill ----
+    ap.add_argument(
+        "--candidate-labels",
+        default=None,
+        help="csv of labels-only forced-candidate label files or run dirs",
+    )
+    ap.add_argument(
+        "--candidate-stores",
+        default=None,
+        help="csv of natural source/fork stores keyed by (source store, game, window)",
+    )
+    ap.add_argument(
+        "--candidate-frac",
+        type=float,
+        default=0.1,
+        help="target policy-gradient share for the candidate contrast",
+    )
+    ap.add_argument("--candidate-w", type=float, default=0.0, help="explicit candidate loss weight")
+    ap.add_argument("--candidate-calib-steps", type=int, default=50)
+    ap.add_argument(
+        "--candidate-margin",
+        type=float,
+        default=6.0,
+        help="bounded candidate-vs-pass log-probability margin",
+    )
     ap.add_argument(
         "--tripwire-tol",
         type=float,
@@ -1218,6 +1316,11 @@ def main() -> None:
     require_player_target_convention(cfg, f"checkpoint {args.ckpt}")
     methods = default_methods()
     n_sa = cfg.get("sa_vocab_size", 0)
+    if args.candidate_labels and not n_sa:
+        raise SystemExit(
+            "candidate drills require a trained SA-level checkpoint "
+            "(config.sa_vocab_size is missing or zero)"
+        )
     net = build_net(cfg["embed"], cfg["pool_manifest"], len(methods), n_sa=n_sa).to(dev)
     net.load_compat(ckpt["model"])
     net.train()
@@ -1338,6 +1441,12 @@ def main() -> None:
                 "seq_clip",
                 "seq_margin",
                 "seq_aux_weight",
+                "candidate_labels",
+                "candidate_stores",
+                "candidate_frac",
+                "candidate_w",
+                "candidate_calib_steps",
+                "candidate_margin",
                 "kl_abort",
             )
         },
@@ -1395,6 +1504,31 @@ def main() -> None:
                 f"[rl] seq batch: {seq['n']} fork windows / {seq['n_labels']} labels "
                 f"({seq['n_cast_target']} specific-cast, {seq['n_mass']} mass-fallback; "
                 f"mean |adv| {seq['mean_abs_adv']:.4f})"
+            )
+    # ---- generic candidate drill batch ----
+    if bool(args.candidate_labels) != bool(args.candidate_stores):
+        raise SystemExit("--candidate-labels and --candidate-stores go together")
+    candidate = None
+    w_candidate: float | None = args.candidate_w if args.candidate_w > 0 else None
+    if args.candidate_labels:
+        from anvil.training.candidate_labels import build_candidate_batch
+
+        candidate = build_candidate_batch(
+            args.candidate_labels.split(","),
+            args.candidate_stores.split(","),
+            cfg["embed"],
+            methods,
+            seg=args.seg,
+            clip=0.25,
+        )
+        if candidate is None:
+            print("[rl] WARNING: candidate labels joined ZERO windows — candidate term OFF this run")
+        else:
+            print(
+                f"[rl] candidate batch: {candidate['n']} windows / {candidate['n_labels']} labels "
+                f"({candidate['positive_adv']} positive / {candidate['negative_adv']} negative; "
+                f"mean |adv| {candidate['mean_abs_adv']:.4f}; "
+                f"realization {candidate['realization_rate']:.3f})"
             )
     # ---- M10 R5 pay-label batch (ADR-0075/0082): built once per invocation
     # from the certified evalset + banked observe frames; class-CE applied
@@ -1463,6 +1597,13 @@ def main() -> None:
     calib_steps = 0
     share_pg = share_seq = 0.0
     share_traj = share_steps = 0
+    # Candidate contrast calibration/telemetry mirrors C-seq but has no
+    # auxiliary value term: forced arms are labels-only interventions.
+    candidate_calib_pg = 0.0
+    candidate_calib_traj = 0
+    candidate_calib_steps = 0
+    candidate_share_raw = candidate_share_pg = 0.0
+    candidate_share_traj = candidate_share_steps = 0
     # D6 plan-aux calibration/telemetry (the w_seq pattern, ADR-0057 rules:
     # instrumented + guarded + recalibrated per invocation unless --plan-w
     # carries the iteration-0 value forward via loop_state)
@@ -1739,6 +1880,12 @@ def main() -> None:
             # the driver guards on the iteration mean
             share_pg += abs(traj_pg)
             share_traj += 1
+        if candidate is not None and w_candidate is None:
+            candidate_calib_pg += abs(traj_pg)
+            candidate_calib_traj += 1
+        if candidate is not None and w_candidate is not None:
+            candidate_share_pg += abs(traj_pg)
+            candidate_share_traj += 1
         if args.plan:
             # same invariant discipline for the plan-aux weight (ADR-0057)
             if w_plan is None:
@@ -1821,6 +1968,46 @@ def main() -> None:
                     acc["seq_aux"] = acc.get("seq_aux", 0.0) + aux_raw
                     share_seq += raw
                     share_steps += 1
+            # ---- generic candidate contrast ----
+            if candidate is not None:
+                if w_candidate is None:
+                    candidate_calib_steps += 1
+                    if candidate_calib_steps >= args.candidate_calib_steps:
+                        raw = candidate_pass(
+                            net,
+                            candidate["segs"],
+                            forward_segments,
+                            0.0,
+                            grad=False,
+                            margin=args.candidate_margin,
+                        )
+                        mean_pg = candidate_calib_pg / max(candidate_calib_traj, 1)
+                        w_candidate = args.candidate_frac * mean_pg / max(abs(raw), 1e-4)
+                        cal = {
+                            "w_candidate": w_candidate,
+                            "candidate_frac": args.candidate_frac,
+                            "mean_abs_pg_per_traj": mean_pg,
+                            "candidate_raw_at_calib": raw,
+                            "calib_steps": candidate_calib_steps,
+                            "calib_traj": candidate_calib_traj,
+                            "n_windows": candidate["n"],
+                        }
+                        (out_dir / "candidate_calibration.json").write_text(
+                            json.dumps(cal, indent=1) + "\n"
+                        )
+                        print(f"[rl] w_candidate calibrated: {cal}")
+                else:
+                    raw = candidate_pass(
+                        net,
+                        candidate["segs"],
+                        forward_segments,
+                        w_candidate,
+                        grad=True,
+                        margin=args.candidate_margin,
+                    )
+                    acc["candidate_raw"] = acc.get("candidate_raw", 0.0) + raw
+                    candidate_share_raw += raw
+                    candidate_share_steps += 1
             if args.plan and w_plan is None and plan_calib_traj:
                 plan_calib_steps += 1
                 if plan_calib_steps >= args.plan_calib_steps:
@@ -1981,6 +2168,15 @@ def main() -> None:
                     )
                 seedlab_share_raw = seedlab_share_pg = 0.0
                 seedlab_share_traj = seedlab_share_steps = 0
+                candidate_share = None
+                if candidate is not None and w_candidate and candidate_share_steps and candidate_share_traj and candidate_share_pg > 0:
+                    candidate_share = round(
+                        w_candidate * abs(candidate_share_raw / candidate_share_steps)
+                        / (candidate_share_pg / candidate_share_traj),
+                        5,
+                    )
+                candidate_share_raw = candidate_share_pg = 0.0
+                candidate_share_traj = candidate_share_steps = 0
                 row = {
                     "step": step,
                     "traj": n_traj,
@@ -1990,6 +2186,8 @@ def main() -> None:
                     # loss share); w_seq is the frozen calibration
                     **({"w_seq": round(w_seq, 6)} if w_seq is not None else {}),
                     **({"seq_share": seq_share} if seq_share is not None else {}),
+                    **({"w_candidate": round(w_candidate, 6)} if candidate is not None and w_candidate is not None else {}),
+                    **({"candidate_share": candidate_share} if candidate_share is not None else {}),
                     **({"w_plan": round(w_plan, 6)} if args.plan and w_plan is not None else {}),
                     **({"plan_share": plan_share} if plan_share is not None else {}),
                     **({"w_sched": round(w_sched, 6)} if args.sched and w_sched is not None else {}),
@@ -2049,6 +2247,23 @@ def main() -> None:
                 save()
         if kl_aborted:
             break
+
+    if candidate is not None:
+        candidate_telemetry = {
+            "labels_loaded": candidate["n_labels"],
+            "joined_windows": candidate["n_joined"],
+            "training_windows": candidate["n"],
+            "positive_advantages": candidate["positive_adv"],
+            "negative_advantages": candidate["negative_adv"],
+            "mean_abs_advantage": candidate["mean_abs_adv"],
+            "realization_rate": candidate["realization_rate"],
+            "target_misses": candidate["n_miss_target"],
+            "label_stats": candidate.get("label_stats", {}),
+            **candidate_policy_stats(net, ref, candidate["segs"], forward_segments),
+        }
+        (out_dir / "candidate_telemetry.json").write_text(
+            json.dumps(candidate_telemetry, indent=1) + "\n"
+        )
 
     save()
     (out_dir / "DONE").touch()  # completion marker: the loop driver skips

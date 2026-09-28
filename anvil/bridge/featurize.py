@@ -14,6 +14,11 @@ History arrives pre-extracted from the worker ("hist": last-K prior decisions
 as {"m","p","e"}, hosts back-filled at ret time to match the training loader's
 joined view); the information-set rule is applied here, mirroring
 transform.history_tokens.
+
+The policy candidate space still collapses identical visible entity rows, but
+candidate-drill joins retain every public (host entity, normalized SA) alias
+for a canonical row. The server can therefore condition the model on the
+canonical candidate while returning the exact requested wire option to Forge.
 """
 
 from __future__ import annotations
@@ -30,7 +35,6 @@ from anvil.encoder.transform import HISTORY_K, assemble, player_seats
 from anvil.store.castplan import ret_plans
 from anvil.training.dataset import (
     COLOR_CLASSES,
-    color_class,
     COMBAT_COUNT_MAX,
     KINDS,
     PAY_KINDS,
@@ -42,6 +46,7 @@ from anvil.training.dataset import (
     MethodVocab,
     SaVocab,
     _eligible_rows,
+    color_class,
     default_sa_vocab,
     norm_sa,
 )
@@ -131,6 +136,9 @@ class Featurizer:
         cand_kind = [-1]
         cand_paykind = [-1]
         cand_first_opt = [-1]  # per candidate: FIRST matching wire-option index
+        cand_keys: list[tuple[int, str] | None] = [None]
+        cand_key_aliases: list[list[tuple[int, str]]] = [[]]
+        wire_to_candidate: list[int] = [0]
         ctx_row = -1
         num_lo, num_hi = 0, X_CLASSES - 1
         color_mask = [True] * COLOR_CLASSES
@@ -144,19 +152,34 @@ class Featurizer:
             # mirrors the loader: (host row, normalized sa) pairs in option
             # order, identical keys collapsed; first-fit picks the executor's
             # option among collapsed duplicates
+            # The model key is row-based, but drill joins use the public
+            # (host entity, normalized SA) identity, so retain aliases.
             key_of: dict[tuple[int, str], int] = {}
             for i, o in enumerate(dec.get("opts") or []):
                 r = row_of.get(o.get("e"))
                 if r is None:
+                    wire_to_candidate.append(-1)
                     continue
+                eid = int(o["e"])
                 key = (r, norm_sa(o.get("sa", "")))
                 if key in key_of:
+                    candidate = key_of[key]
+                    alias = (eid, key[1])
+                    if alias not in cand_key_aliases[candidate]:
+                        cand_key_aliases[candidate].append(alias)
+                    wire_to_candidate.append(candidate)
                     continue
-                key_of[key] = len(cand_rows)
+                candidate = len(cand_rows)
+                key_of[key] = candidate
                 cand_rows.append(r)
                 cand_sa.append(self.sa_vocab.id(key[1]))
                 cand_kind.append(KINDS.get(o.get("kind"), KINDS["other"]))
                 cand_first_opt.append(i)
+                # The row number is the model identity; keep the first wire
+                # host alongside it for compatibility and audits.
+                cand_keys.append((eid, key[1]))
+                cand_key_aliases.append([(eid, key[1])])
+                wire_to_candidate.append(candidate)
         elif task == "pay_class":
             # M9 §3c goal options (m9-payment-surface-spec §12a / rung-3 pins).
             # Option 0 = {"auto":true} rides the PASS slot. Each goal option
@@ -272,6 +295,12 @@ class Featurizer:
         aux = {
             "cand_rows": cand_rows,
             "cand_first_opt": cand_first_opt,
+            "candidate_keys": cand_keys,
+            "candidate_key_aliases": cand_key_aliases,
+            # Wire index 0 is PASS. Duplicate wire options deliberately map
+            # to the same canonical candidate; unknown/unjoined options are
+            # -1 and can never be forced by the bridge.
+            "wire_to_candidate": wire_to_candidate,
             "row_min_id": row_min_id,
             "stack_ids": stack_ids,
             "n_players": n_players,

@@ -46,7 +46,151 @@ def _load_curation(path: Path, limit: int = 0) -> list[dict]:
     return rows
 
 
+def _load_candidate_points(path: Path, limit: int = 0) -> list[dict]:
+    """Read miner JSONL (or a JSON array) without consulting outcomes."""
+    if path.suffix == ".json":
+        rows = json.loads(path.read_text())
+    else:
+        rows = [json.loads(line) for line in path.open() if line.strip()]
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
+def _candidate_tsv_field(value: object, field: str) -> str:
+    text = str(value)
+    if any(char in text for char in "\t\r\n"):
+        raise SystemExit(
+            f"FATAL: candidate {field} contains a tab/newline and cannot be "
+            f"represented in the target TSV: {text!r}"
+        )
+    return text
+
+
+def _candidate_plan(a: argparse.Namespace) -> None:
+    points = _load_candidate_points(a.candidate_points, a.limit)
+    if not points:
+        raise SystemExit("FATAL: --candidate-points contains no rows")
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    by_store: dict[str, list[dict]] = defaultdict(list)
+    for row in points:
+        c = row.get("candidate") or {}
+        if row.get("store") is None or row.get("g", row.get("game")) is None:
+            raise SystemExit(f"FATAL: candidate point lacks store/game: {row}")
+        if c.get("entity") is None or c.get("sa") is None:
+            raise SystemExit(f"FATAL: candidate point lacks entity/sa: {row}")
+        by_store[str(row["store"])].append(row)
+
+    arms = []
+    for fork_ns, (store, srows) in enumerate(sorted(by_store.items())):
+        run_dir = Path(store) if Path(store).exists() else RUNS_DIR / store
+        # The miner normally emits a stable run label via --store-label.  If
+        # a caller instead leaves the trajectory-store path in the point
+        # file, recover the corresponding harness run by basename so the
+        # replay recipe remains available.
+        if not (run_dir / "run.json").exists() and (RUNS_DIR / run_dir.name).exists():
+            run_dir = RUNS_DIR / run_dir.name
+        run_json = run_dir / "run.json"
+        if not run_json.exists():
+            sys.exit(f"FATAL: source run dir not found for store {store!r} (expected {run_json})")
+        cfg = json.loads(run_json.read_text())
+        pairs = None
+        if cfg.get("pairs_file"):
+            pairs = run_dir / cfg["pairs_file"]
+            if not pairs.exists():
+                sys.exit(f"FATAL: pairs file missing: {pairs}")
+        decks = cfg.get("decks")
+        if pairs is None and not decks:
+            sys.exit(
+                f"FATAL: source run {run_dir} has neither pairs_file nor fixed decks"
+            )
+
+        grouped: dict[int, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
+        for row in srows:
+            game = int(row.get("g", row.get("game")))
+            window = int(row.get("window", row.get("windowId", row.get("s"))))
+            grouped[game][window].append(row)
+        target_file = out / f"candidate-{Path(store).name}.tsv"
+        drill_file = out / f"drill-{Path(store).name}.txt"
+        with target_file.open("w") as f:
+            f.write(f"# source-store={store}\n")
+            f.write("gameIdx\twindowId\tordinal\tturn\tphase\tseat\tentityId\tnormalizedSA\n")
+            for game in sorted(grouped):
+                for window in sorted(grouped[game]):
+                    arms_for_window = sorted(
+                        grouped[game][window],
+                        key=lambda r: (
+                            int((r.get("candidate") or {}).get("entity")),
+                            str((r.get("candidate") or {}).get("sa")),
+                        ),
+                    )
+                    for ordinal, row in enumerate(arms_for_window):
+                        c = row["candidate"]
+                        values = (
+                            game,
+                            window,
+                            ordinal,
+                            int(row.get("turn", 0)),
+                            _candidate_tsv_field(row.get("phase", ""), "phase"),
+                            int(row.get("seat", -1)),
+                            int(c["entity"]),
+                            _candidate_tsv_field(c["sa"], "normalizedSA"),
+                        )
+                        f.write("\t".join(map(str, values)) + "\n")
+        with drill_file.open("w") as f:
+            f.write(f"# candidate drill targets from {a.candidate_points}\n")
+            for game in sorted(grouped):
+                turns = sorted({int(r.get("turn", 0)) for rs in grouped[game].values() for r in rs})
+                f.write(f"{game} {','.join(str(max(1, t)) for t in turns)}\n")
+        idxs = sorted(grouped)
+        arms.append(
+            {
+                "store": store,
+                "fork_ns": fork_ns,
+                "source_run": str(run_dir),
+                "drillfile": str(drill_file),
+                "candidate_file": str(target_file),
+                "pairs_file": str(pairs) if pairs is not None else None,
+                "decks": list(decks) if decks else None,
+                "format": cfg.get("format", "Commander"),
+                "pairs_sha256": cfg.get("pairs_sha256"),
+                "seed_base": cfg["seed_base"],
+                "games_per_pair": cfg.get("games_per_pair"),
+                "bridge_seats": cfg["bridge_seats"],
+                "reask": cfg["reask"],
+                "fork_commit": cfg["fork_commit"],
+                "jar_sha256": cfg["jar_sha256"],
+                "pool_version": cfg.get("pool_version"),
+                "n_drills": len(srows),
+                "n_windows": sum(len(x) for x in grouped.values()),
+                "n_games": len(idxs),
+                "index_min": idxs[0],
+                "index_span": idxs[-1] - idxs[0] + 1,
+            }
+        )
+    manifest = {
+        "candidate_mode": True,
+        "candidate_points": str(a.candidate_points),
+        "candidate_points_sha256": hashlib.sha256(a.candidate_points.read_bytes()).hexdigest(),
+        "ckpt": a.ckpt,
+        "k": a.k,
+        "tag": getattr(a, "tag", "") or "candidate",
+        "limit": a.limit or None,
+        "arms": arms,
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(
+        f"[plan] {sum(x['n_drills'] for x in arms)} candidate arms in "
+        f"{sum(x['n_windows'] for x in arms)} windows -> {out / 'manifest.json'}"
+    )
+
+
 def plan(a: argparse.Namespace) -> None:
+    if getattr(a, "candidate_points", None):
+        return _candidate_plan(a)
+    if not getattr(a, "curation", None):
+        raise SystemExit("FATAL: plan requires --curation or --candidate-points")
     if a.tag and not a.tag.isalnum():
         sys.exit(
             f"FATAL: --tag must be alphanumeric (got {a.tag!r}) — it "
@@ -139,20 +283,24 @@ def _launch_arms(
     fork_obs: bool = False,
     force_seq: int | None = None,
     seq_arms: str | None = None,
+    force_candidate: bool = False,
 ) -> None:
     from anvil.training.selfplay import _run
 
     for arm in manifest["arms"]:
         purpose = f"{purpose_prefix}-{arm['store']}"
-        cmd = [
-            sys.executable,
-            "-m",
-            "anvil.bridge.harness",
-            "launch",
-            "--pairs-file",
-            arm["pairs_file"],
-            "--games-per-pair",
-            str(arm["games_per_pair"]),
+        cmd = [sys.executable, "-m", "anvil.bridge.harness", "launch"]
+        if arm.get("pairs_file"):
+            cmd += ["--pairs-file", arm["pairs_file"]]
+            if arm.get("games_per_pair") is not None:
+                cmd += ["--games-per-pair", str(arm["games_per_pair"])]
+        elif arm.get("decks"):
+            cmd += ["--decks", *arm["decks"]]
+        else:
+            raise SystemExit(f"FATAL: arm {arm['store']} has no deck source")
+        cmd += [
+            "--format",
+            arm.get("format", "Commander"),
             "--seed-base",
             str(arm["seed_base"]),
             "--start-index",
@@ -187,6 +335,10 @@ def _launch_arms(
             cmd += ["--force-seq", str(force_seq)]
             if seq_arms:
                 cmd += ["--seq-arms", seq_arms]
+        if force_candidate:
+            if not arm.get("candidate_file"):
+                raise SystemExit(f"FATAL: arm {arm['store']} has no candidate target file")
+            cmd += ["--force-candidate-file", arm["candidate_file"]]
         print(
             f"[launch] {purpose}: {arm['n_drills']} drills / "
             f"{arm['n_games']} games (span {arm['index_span']})"
@@ -202,6 +354,9 @@ def generate(a: argparse.Namespace) -> None:
     out = Path(a.manifest)
     manifest = json.loads((out / "manifest.json").read_text())
     prefix = "drill" + manifest.get("tag", "")
+    force_candidate = bool(getattr(a, "force_candidate", False))
+    if force_candidate and not manifest.get("candidate_mode"):
+        sys.exit("FATAL: --force-candidate requires a candidate-point manifest")
     if a.sample_mainline and a.sample_forks:
         sys.exit(
             "FATAL: --sample-mainline is the map path; "
@@ -218,6 +373,14 @@ def generate(a: argparse.Namespace) -> None:
                 "FATAL: --force-seq needs --drill-ckpt (the act arm is the "
                 "CURRENT policy's preferred cast — labels are policy-conditional)"
             )
+    if force_candidate:
+        if a.fork_obs or a.sample_forks or a.force_seq:
+            sys.exit(
+                "FATAL: --force-candidate is labels-only and cannot be combined "
+                "with --fork-obs, --sample-forks, or --force-seq"
+            )
+        if not a.drill_ckpt:
+            sys.exit("FATAL: --force-candidate needs --drill-ckpt")
     if a.seq_arms and not a.force_seq:
         sys.exit("FATAL: --seq-arms requires --force-seq")
     if a.sample_forks:
@@ -241,6 +404,9 @@ def generate(a: argparse.Namespace) -> None:
                 a.port,
                 out / f"drill-server-{i}.log",
                 sample=False,
+                device=getattr(a, "device", "cuda:0"),
+                max_batch=getattr(a, "max_batch", 16),
+                batch_window_ms=getattr(a, "batch_window_ms", 3.0),
                 drill_ckpt=a.drill_ckpt,
                 drill_sample=True,
                 drill_mu_out=mu_path,
@@ -255,6 +421,7 @@ def generate(a: argparse.Namespace) -> None:
                     a.drill_stop,
                     prefix,
                     fork_obs=True,
+                    force_candidate=False,
                 )
             finally:
                 _stop_server(server)
@@ -275,11 +442,14 @@ def generate(a: argparse.Namespace) -> None:
             a.port,
             out / "drill-server.log",
             sample=a.sample_mainline,
+            device=getattr(a, "device", "cuda:0"),
+            max_batch=getattr(a, "max_batch", 16),
+            batch_window_ms=getattr(a, "batch_window_ms", 3.0),
             mu_out=out / "mu-mainline.jsonl",
             drill_ckpt=a.drill_ckpt,
             # forced-seq arms are always instrument-served (sampled, no mu —
             # labels-only); sampled mainline needs it for the wire forks too
-            instrument=a.sample_mainline or bool(a.force_seq),
+            instrument=a.sample_mainline or bool(a.force_seq) or force_candidate,
         )
         try:
             _launch_arms(
@@ -293,6 +463,7 @@ def generate(a: argparse.Namespace) -> None:
                 fork_obs=a.fork_obs,
                 force_seq=a.force_seq,
                 seq_arms=a.seq_arms,
+                force_candidate=force_candidate,
             )
         finally:
             _stop_server(server)
@@ -663,7 +834,13 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("plan")
-    p.add_argument("--curation", type=Path, required=True)
+    p.add_argument("--curation", type=Path, required=False)
+    p.add_argument(
+        "--candidate-points",
+        type=Path,
+        default=None,
+        help="outcome-blind JSONL from mine_priority_candidates.py",
+    )
     p.add_argument("--out", required=True)
     p.add_argument(
         "--ckpt",
@@ -700,6 +877,13 @@ def main() -> None:
     g.add_argument("--ckpt", default=None, help="override the manifest checkpoint")
     g.add_argument("--k", type=int, default=None, help="override the manifest K")
     g.add_argument("--port", type=int, default=50067)
+    g.add_argument(
+        "--device",
+        default="cuda:0",
+        help="PyTorch device for the model server (for example, cpu or cuda:0)",
+    )
+    g.add_argument("--max-batch", type=int, default=16)
+    g.add_argument("--batch-window-ms", type=float, default=3.0)
     g.add_argument("--workers", type=int, default=8)
     g.add_argument("--chunk", type=int, default=50)
     g.add_argument(
@@ -757,6 +941,11 @@ def main() -> None:
         help="M8 D1: 'nat' = the NATURAL arm alone under an OBSERVE "
         "directive (per-completion first-spell/first-land timing "
         "recording, never forces); requires --force-seq",
+    )
+    g.add_argument(
+        "--force-candidate",
+        action="store_true",
+        help="labels-only natural/forced candidate arms from a candidate manifest",
     )
     g.set_defaults(fn=generate)
 
