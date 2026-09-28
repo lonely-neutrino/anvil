@@ -279,7 +279,7 @@ def main() -> None:
                     mu_out=RUNS_DIR / f"{purpose_prefix}-w{w}-mu.jsonl",
                     temperature=1.0,
                     max_batch=a.max_batch,
-                    batch_window_ms=a.batch_window_ms,
+                    window_ms=a.batch_window_ms,
                 )
             r = arm(
                 w,

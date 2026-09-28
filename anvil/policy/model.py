@@ -884,6 +884,7 @@ class AnvilNet(nn.Module):
         noise: "dict | None" = None,
         temperature: float = 1.0,
         sched_decode: bool = False,
+        forced_choice: "torch.Tensor | None" = None,
     ) -> dict:
         """Greedy inference (M1 D8 serve path). Mirrors forward()'s encode and
         pointer plumbing but conditions the target decoder on the MODEL's
@@ -932,7 +933,32 @@ class AnvilNet(nn.Module):
             return pick
 
         logits = self._pointer_logits(state, ent_out, batch, pass_delta=pass_delta)
-        choice = cat_pick(logits, noise and noise["choice"], "choice")
+        natural_choice = cat_pick(logits, noise and noise["choice"], "choice")
+        forced_mask = torch.zeros_like(natural_choice, dtype=torch.bool)
+        if forced_choice is not None:
+            forced_choice = forced_choice.to(device=natural_choice.device, dtype=torch.long).reshape(-1)
+            if forced_choice.shape[0] != natural_choice.shape[0]:
+                raise ValueError("forced_choice batch dimension does not match model batch")
+            forced_mask = forced_choice >= 0
+            if (forced_choice[forced_mask] >= logits.shape[1]).any():
+                raise ValueError("forced candidate index is outside the padded candidate space")
+            if forced_mask.any() and not batch["cand_mask"].gather(
+                1, forced_choice.clamp(min=0).unsqueeze(1)
+            )[forced_mask].all():
+                raise ValueError("forced candidate is absent from the legal candidate mask")
+            choice = torch.where(forced_mask, forced_choice, natural_choice)
+            # A forced action is an intervention, not a behavior-policy draw.
+            # Mixed batches still run through one GPU call; only the natural
+            # rows retain choice-factor mu/entropy.
+            if noise is not None:
+                mu["logp_choice"] = torch.where(
+                    forced_mask, torch.zeros_like(mu["logp_choice"]), mu["logp_choice"]
+                )
+                mu["ent_choice"] = torch.where(
+                    forced_mask, torch.zeros_like(mu["ent_choice"]), mu["ent_choice"]
+                )
+        else:
+            choice = natural_choice
 
         rows_src = batch["cand_rows"].gather(1, choice.unsqueeze(1)).clamp(min=0)
         src_vec = ent_out.gather(1, rows_src.unsqueeze(-1).expand(-1, -1, ent_out.shape[-1]))
@@ -1032,6 +1058,11 @@ class AnvilNet(nn.Module):
             "pay_gate": torch.sigmoid(self.pay_gate(state).squeeze(-1)),
             # Build 4: the allocation head's P(act) — the anvil.alloc ask
             "alloc": torch.sigmoid(self.alloc_head(state).squeeze(-1)),
+            # The unforced categorical mass is useful for offline evaluation
+            # telemetry. It is computed before any intervention and is not
+            # used by answer translation or training.
+            "choice_probs": torch.softmax(logits.float() / temperature, dim=-1),
+            "forced_mask": forced_mask,
             "plan": out[:, 1],  # D6 serve carry: the emitted plan vector
             **sched,
             "tgt_picks": torch.stack(picks, dim=1),

@@ -119,6 +119,18 @@ SURFACE_TAG_OF_TASK = {"surf_one": "mtg.surface.entity_one", "surf_set": "mtg.su
                        "surf_damage": "mtg.surface.damage", "surf_target": "mtg.surface.target"}
 
 
+def is_drill_game_id(game_id: str) -> bool:
+    """Return whether a wire-only rollout should use the drill policy.
+
+    ``.f`` is the legacy forced-branch marker. Candidate drills use ``.w``
+    because their stable identity is keyed by source window rather than the
+    transient fork counter. Both are labels-only wire sessions and must be
+    routed to ``--drill-ckpt``; otherwise candidate arms accidentally run the
+    pinned source checkpoint.
+    """
+    return ".f" in game_id or ".w" in game_id
+
+
 class _Batcher:
     """GPU micro-batching (D6 groundwork): worker streams featurize in
     parallel and submit examples here; one thread drains up to max_batch
@@ -196,8 +208,21 @@ class _Batcher:
             f"({fwd / self.stats_every * 100:.0f}% busy), queue max {depth}"
         )
 
-    def submit(self, ex: dict, pass_delta: float, noise: "dict | None" = None) -> dict:
-        slot = {"ex": ex, "pd": pass_delta, "nz": noise, "ev": threading.Event(), "t": time.monotonic()}
+    def submit(
+        self,
+        ex: dict,
+        pass_delta: float,
+        noise: "dict | None" = None,
+        forced_choice: "int | None" = None,
+    ) -> dict:
+        slot = {
+            "ex": ex,
+            "pd": pass_delta,
+            "nz": noise,
+            "forced": -1 if forced_choice is None else int(forced_choice),
+            "ev": threading.Event(),
+            "t": time.monotonic(),
+        }
         self.q.put(slot)
         slot["ev"].wait()
         if "err" in slot:
@@ -213,6 +238,9 @@ class _Batcher:
             batch = {k: v.to(self.device) for k, v in collate([s["ex"] for s in slots]).items()}
             pd = self.torch.tensor(
                 [[s["pd"]] for s in slots], device=self.device, dtype=self.torch.float32
+            )
+            forced = self.torch.tensor(
+                [s["forced"] for s in slots], device=self.device, dtype=self.torch.long
             )
             nz = (
                 pad_noise([s["nz"] for s in slots], batch, self.device)
@@ -231,6 +259,7 @@ class _Batcher:
                     noise=nz,
                     temperature=self.temperature,
                     sched_decode=self.sched_decode,
+                    forced_choice=forced,
                 )
             for i, s in enumerate(slots):
                 # per-item views keep the batch dim; scalars are shared
@@ -338,6 +367,10 @@ class ModelBackend:
         # no SA descriptor and answers host_level=True (Java runs the full
         # disambiguation ladder). D2+ checkpoints name the SA themselves.
         self.n_sa = cfg.get("sa_vocab_size", 0)
+        # Candidate-specific intervention is only meaningful for the v1
+        # SA-level policy.  Host-only checkpoints cannot identify a requested
+        # (entity, SA) arm and must advertise a hard capability miss.
+        self.supports_forced_priority = bool(self.n_sa)
         # trained combat heads present? (D5 checkpoints; pre-D5 ones get
         # fresh-init heads from load_compat and must not serve combat tags)
         self.has_combat = any(k.startswith(("atk_", "blk_", "cmb_")) for k in ckpt["model"])
@@ -584,6 +617,37 @@ class ModelBackend:
             # the mu record and answer path need nothing special.
             self.counts["reask"] += 1
         ex, aux = self.feat.example(dec, header, task)
+        forced_choice = None
+        forced_wire_option = None
+        forced_request = bool(req.force_option)
+        if forced_request:
+            if task != "priority":
+                self.counts["force_nonpriority"] += 1
+                return None
+            if not self.supports_forced_priority:
+                self.counts["force_unsupported_host_checkpoint"] += 1
+                return None
+            # CastPlan and DecisionRequest use the engine's one-based option
+            # convention: 0 is PASS, option 1 names req.options[0].
+            wire = int(req.forced_option)
+            if wire <= 0 or wire > len(req.options):
+                self.counts["force_invalid_index"] += 1
+                return None
+            wire_to_candidate = aux.get("wire_to_candidate") or []
+            pos = wire  # aux[0] is PASS, aux[1] is req.options[0]
+            if pos >= len(wire_to_candidate):
+                self.counts["force_invalid_index"] += 1
+                return None
+            forced_choice = int(wire_to_candidate[pos])
+            if forced_choice <= 0:
+                self.counts["force_unmapped"] += 1
+                return None
+            # Keep the requested wire option separate from the canonical
+            # model choice. Several identical visible entities can share one
+            # dedup row; returning cand_first_opt here would silently rewrite
+            # a request for the second copy into the first copy.
+            forced_wire_option = wire
+            self.counts["force_requested"] += 1
         plan_key, plan_emit = self._plan_inject(ex, header, dec)
         sched_ctx = None
         if self.sched_serve is not None and (
@@ -645,7 +709,7 @@ class ModelBackend:
                 sched_ctx = {**sched_ctx, "decode": False}
                 self.counts["sched_bind_twopass"] += 1
             bind_row = self.sched_serve.bind(sched_ctx, ex, aux, dec)
-        out = self.batcher.submit(ex, delta, noise)
+        out = self.batcher.submit(ex, delta, noise, forced_choice=forced_choice)
         if plan_emit and plan_key is not None:
             self._plan_store(plan_key, dec.get("t", 0), out["plan"][0].float().cpu())
         sched_row = None
@@ -678,11 +742,13 @@ class ModelBackend:
                             "choice": int(out["choice"][0]),
                             "n_cands": len(aux["cand_first_opt"]),
                         }) + "\n")
-        if sampled and not wire_fork:
+        if sampled and not wire_fork and not forced_request:
             self._write_mu(header["g"], dec, task, ex, aux, out, sched=sched_row)
         resp = pb.DecisionResponse(decision_seq=req.decision_seq)
         if task == "priority":
-            resp.construct.cast_plan.CopyFrom(self._castplan(out, aux))
+            resp.construct.cast_plan.CopyFrom(
+                self._castplan(out, aux, forced_option=forced_wire_option)
+            )
         elif task == "attack":
             resp.construct.attack_map.CopyFrom(self._attackmap(out, aux))
         elif task == "block":
@@ -858,13 +924,20 @@ class ModelBackend:
         with self.mu_lock:
             self.mu_file.write(json.dumps(rec) + "\n")
 
-    def _castplan(self, out: dict, aux: dict) -> pb.CastPlan:
+    def _castplan(
+        self, out: dict, aux: dict, forced_option: int | None = None
+    ) -> pb.CastPlan:
         cp = pb.CastPlan()
         choice = int(out["choice"][0])
         if choice == 0:
+            if forced_option is not None:
+                raise ValueError("forced candidate inference returned PASS")
             self.counts["pass"] += 1
             return cp  # spell_option 0 = pass (label-space convention)
-        cp.spell_option = aux["cand_first_opt"][choice] + 1
+        if forced_option is None:
+            cp.spell_option = aux["cand_first_opt"][choice] + 1
+        else:
+            cp.spell_option = int(forced_option)
         # SA-level model (D2+): the option index IS the chosen SA — the Java
         # ladder skips its kind/order rungs (shape->pay only). Host-level
         # checkpoints keep the full ladder.
@@ -965,7 +1038,8 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
         # tag is not served (an ask would fall back = no rollouts).
         self.certifier = certifier
         # Dual-policy drill serving (M4 D2.4): fork wire sessions (wid
-        # contains ".f", e.g. "g42.f0r3") are answered by drill_backend while
+        # contains ".f" or ".w", e.g. "g42.f0r3" or
+        # "g42.w4.r0.n") are answered by drill_backend while
         # the mainline replay stays on the pinned backend — per-checkpoint
         # drill evals need the replay policy frozen to reach the fork at all.
         self.drill_backend = drill_backend
@@ -980,6 +1054,14 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
         self._err_traces: dict[str, int] = {}
         self.games = 0
         self.t0 = time.monotonic()
+        backends = [b for b in (backend, drill_backend) if b is not None]
+        if seat_backends:
+            backends.extend(seat_backends.values())
+        self.forced_priority_option = bool(
+            mode == "model"
+            and backends
+            and all(getattr(b, "supports_forced_priority", False) for b in backends)
+        )
 
     def _backend_for(self, req: pb.DecisionRequest) -> ModelBackend | None:
         """Choose a seat-specific policy for a normal model request.
@@ -1041,6 +1123,7 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
                         bridged_tags=self.bridged_tags,
                         default_deadline_ms=self.deadline_ms,
                         one_shot_cast=self.mode == "model",
+                        forced_priority_option=self.forced_priority_option,
                     )
                 )
             elif kind == "game_start":
@@ -1049,7 +1132,9 @@ class DecisionServicer(pb_grpc.DecisionBridgeServicer):
                 rng = random.Random(game_seed)
                 # Requests belong to the stream's last-announced game; the
                 # worker re-announces the mainline after each fork block.
-                use_drill = self.drill_backend is not None and ".f" in msg.game_start.game_id
+                use_drill = self.drill_backend is not None and is_drill_game_id(
+                    msg.game_start.game_id
+                )
                 greedy = is_search_session(msg.game_start.game_id)
                 header = None
                 if msg.game_start.header:
@@ -1257,7 +1342,7 @@ def main() -> None:
         "--drill-ckpt",
         default=None,
         help="dual-policy drill serving (M4 D2.4): fork wire "
-        "sessions (wid contains '.f') are answered by this "
+        "sessions (wid contains '.f' or '.w') are answered by this "
         "checkpoint; the mainline replay stays on --ckpt. "
         "Model mode only. Argmax unless --drill-sample.",
     )

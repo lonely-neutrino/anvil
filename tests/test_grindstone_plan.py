@@ -8,6 +8,7 @@ replay recipe verbatim (seed base, bridge seats, re-ask, jar/fork pins).
 
 import argparse
 import json
+from pathlib import Path
 
 import pytest
 
@@ -106,6 +107,90 @@ def test_plan_peak_anchor(tmp_path, src_arm):
     assert m["anchor"] == "peak" and m["turn_offset"] == -1
     lines = [ln for ln in open(m["arms"][0]["drillfile"]) if not ln.startswith("#")]
     assert lines == ["3 7\n"]  # peak 8 - 1, crash turn ignored
+
+
+def test_candidate_plan_groups_arms_by_stable_window(tmp_path, src_arm):
+    points = tmp_path / "candidate-points.jsonl"
+    rows = [
+        {
+            "store": src_arm.name,
+            "g": 17,
+            "window": 4,
+            "turn": 7,
+            "phase": "COMBAT_DECLARE_ATTACKERS",
+            "seat": 1,
+            "candidate": {"entity": 200, "sa": "Spell B"},
+        },
+        {
+            "store": src_arm.name,
+            "g": 17,
+            "window": 4,
+            "turn": 7,
+            "phase": "COMBAT_DECLARE_ATTACKERS",
+            "seat": 1,
+            "candidate": {"entity": 100, "sa": "Spell A"},
+        },
+    ]
+    points.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    out = tmp_path / "candidate-plan"
+    gs.plan(
+        argparse.Namespace(
+            curation=None,
+            candidate_points=points,
+            out=str(out),
+            ckpt="ckpt/last.pt",
+            k=2,
+            limit=0,
+            tag="cand000",
+        )
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    arm = manifest["arms"][0]
+    assert manifest["candidate_mode"] is True
+    assert manifest["tag"] == "cand000"
+    assert arm["n_windows"] == 1 and arm["n_drills"] == 2
+    lines = [line for line in Path(arm["candidate_file"]).read_text().splitlines() if not line.startswith("#")]
+    assert lines[1].split("\t")[2] == "0"
+    assert lines[2].split("\t")[2] == "1"
+
+
+def test_candidate_plan_preserves_fixed_deck_source(tmp_path, src_arm):
+    cfg = dict(SRC_CFG)
+    for key in ("pairs_file", "pairs_sha256", "games_per_pair"):
+        cfg.pop(key, None)
+    cfg.update({"decks": ["monoWhiteWeenie.dck", "monoWhiteWeenie.dck"], "format": "Constructed"})
+    (src_arm / "run.json").write_text(json.dumps(cfg))
+    points = tmp_path / "candidate-points.jsonl"
+    points.write_text(
+        json.dumps(
+            {
+                "store": src_arm.name,
+                "g": 17,
+                "window": 4,
+                "turn": 7,
+                "phase": "COMBAT_DECLARE_ATTACKERS",
+                "seat": 1,
+                "candidate": {"entity": 100, "sa": "Brave the Elements"},
+            }
+        )
+        + "\n"
+    )
+    out = tmp_path / "fixed-deck-candidate-plan"
+    gs.plan(
+        argparse.Namespace(
+            curation=None,
+            candidate_points=points,
+            out=str(out),
+            ckpt="ckpt/last.pt",
+            k=2,
+            limit=0,
+            tag="candfixed",
+        )
+    )
+    arm = json.loads((out / "manifest.json").read_text())["arms"][0]
+    assert arm["pairs_file"] is None
+    assert arm["decks"] == ["monoWhiteWeenie.dck", "monoWhiteWeenie.dck"]
+    assert arm["format"] == "Constructed"
 
 
 def test_plan_rejects_non_alnum_tag(tmp_path, src_arm):
@@ -409,3 +494,34 @@ def test_plan_assigns_fork_namespaces(tmp_path, src_arm):
     m = _plan(_curation(tmp_path, rows), tmp_path / "plan")
     ns_of = {a["store"]: a["fork_ns"] for a in m["arms"]}
     assert ns_of == {src_arm.name: 0, arm2.name: 1}
+
+
+
+def test_candidate_plan_rejects_unrepresentable_tsv_fields(tmp_path, src_arm):
+    points = tmp_path / "candidate-points.jsonl"
+    points.write_text(
+        json.dumps(
+            {
+                "store": src_arm.name,
+                "g": 17,
+                "window": 4,
+                "turn": 7,
+                "phase": "MAIN1",
+                "seat": 1,
+                "candidate": {"entity": 100, "sa": "bad\tability"},
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(SystemExit, match="normalizedSA"):
+        gs.plan(
+            argparse.Namespace(
+                curation=None,
+                candidate_points=points,
+                out=str(tmp_path / "bad-plan"),
+                ckpt="ckpt/last.pt",
+                k=2,
+                limit=0,
+                tag="cand000",
+            )
+        )

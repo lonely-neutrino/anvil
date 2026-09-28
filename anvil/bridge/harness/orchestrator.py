@@ -288,6 +288,8 @@ class Run:
             # M12 Build 2: verbatim AnvilRun flags (the search directive's
             # budget / acting pins) — part of the arm's identity
             cmd += list(m["forge_args"])
+        if m.get("force_candidate_file"):
+            cmd += ["-forcecandidate", str(self.dir / m["force_candidate_file"])]
         (wdir / "cmd.txt").write_text(" ".join(cmd) + "\n")
         out = open(wdir / "out.log", "a")
         # Forge's Main inits Sentry + AWT before CLI dispatch; with no
@@ -502,7 +504,13 @@ def launch(a) -> Path:
         import shutil
 
         shutil.copy(a.drill_file, run_dir / "drillfile.txt")
-    elif a.pool:
+    if getattr(a, "force_candidate_file", None):
+        # Keep the candidate target with the immutable run manifest; Forge is
+        # launched from its own checkout and must not resolve a caller's cwd.
+        import shutil
+
+        shutil.copy(a.force_candidate_file, run_dir / "candidate-points.tsv")
+    if a.pool:
         from anvil.bridge.harness.pairs import (
             latest_pool_manifest,
             pair_schedule,
@@ -599,6 +607,9 @@ def launch(a) -> Path:
         # M12 Build 2: verbatim AnvilRun flags + per-worker labels
         "forge_args": (getattr(a, "forge_args", None) or "").split() or None,
         "labels": getattr(a, "labels", False),
+        "force_candidate_file": (
+            "candidate-points.tsv" if getattr(a, "force_candidate_file", None) else None
+        ),
     }
     (run_dir / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(

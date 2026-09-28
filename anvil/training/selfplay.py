@@ -734,6 +734,147 @@ def _drill_phase(
     return stores
 
 
+def _candidate_phase(
+    args,
+    state: dict,
+    k: int,
+    candidate_dir: Path,
+    source_runs: list[Path],
+    port: int | None = None,
+    workers: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """Mine and run one generic priority-candidate campaign.
+
+    The ordinary iteration stores are the outcome-independent source corpus.
+    Candidate rollouts are labels-only; the returned stores are those natural
+    source stores, so the learner can rebuild the exact priority windows
+    without admitting forced trajectories to V-trace.
+    """
+    phase = candidate_dir
+    phase.mkdir(exist_ok=True)
+    source_stores = [str(TRAJ_DIR / run.name) for run in source_runs]
+    if not source_stores:
+        return [], []
+    points = phase / "points.jsonl"
+    # Mixed-seat source batches carry their bridged seat in run.json.  Infer
+    # that mapping unless the caller supplied an explicit global override;
+    # otherwise a h0/h1 pair would spend the point budget mining the
+    # heuristic seat and later discard it as SEAT_MISMATCH.
+    seat_groups: dict[str | None, list[tuple[str, Path]]] = {}
+    override = args.candidate_model_seats
+    for store, run in zip(source_stores, source_runs):
+        seat_spec = override
+        if seat_spec is None:
+            try:
+                cfg = json.loads((run / "run.json").read_text())
+                raw = cfg.get("bridge_seats")
+                if isinstance(raw, list):
+                    seat_spec = ",".join(str(int(x)) for x in raw)
+                elif raw is not None and str(raw).strip():
+                    seat_spec = str(raw)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                # A legacy source without a run manifest is treated as
+                # all-seats bridged; an explicit override remains available.
+                seat_spec = None
+        seat_groups.setdefault(seat_spec, []).append((store, run))
+
+    point_rows: list[dict] = []
+    for group_no, (seat_spec, group) in enumerate(sorted(seat_groups.items(), key=lambda x: str(x[0]))):
+        group_points = phase / f"points-{group_no}.jsonl"
+        cmd = [
+            sys.executable,
+            "scripts/mine_priority_candidates.py",
+            "--out",
+            str(group_points),
+        ]
+        if seat_spec is not None:
+            cmd += ["--model-seats", seat_spec]
+        for store, run in group:
+            cmd += ["--store", store, "--store-label", run.name]
+        if args.candidate_sa_regex:
+            cmd += ["--sa-regex", args.candidate_sa_regex]
+        if args.candidate_points_per_iter:
+            cmd += ["--limit", str(args.candidate_points_per_iter)]
+        _run(cmd)
+        if group_points.exists():
+            point_rows.extend(
+                json.loads(line)
+                for line in group_points.read_text().splitlines()
+                if line.strip()
+            )
+    point_rows.sort(
+        key=lambda row: (
+            str(row.get("store", "")),
+            int(row.get("g", row.get("game", 0))),
+            int(row.get("window", row.get("windowId", row.get("s", 0)))),
+            int((row.get("candidate") or {}).get("entity", -1)),
+            str((row.get("candidate") or {}).get("sa", "")),
+        )
+    )
+    if args.candidate_points_per_iter:
+        point_rows = point_rows[: args.candidate_points_per_iter]
+    points.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in point_rows))
+    if not points.exists() or not points.read_text().strip():
+        print(f"[selfplay] iteration {k}: candidate miner found no legal points")
+        return [], source_stores
+
+    tag = f"cand{k:03d}"
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "anvil.grindstone",
+            "plan",
+            "--candidate-points",
+            str(points),
+            "--out",
+            str(phase / "plan"),
+            "--ckpt",
+            state["ckpt"],
+            "--k",
+            str(args.candidate_k),
+            "--tag",
+            tag,
+        ]
+    )
+    before = set(glob.glob(str(RUNS_DIR / f"drill{tag}-*")))
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "anvil.grindstone",
+            "generate",
+            "--manifest",
+            str(phase / "plan"),
+            "--port",
+            str(port or args.port),
+            "--workers",
+            str(workers or args.workers),
+            "--force-candidate",
+            "--sample-mainline",
+            "--drill-ckpt",
+            state["ckpt"],
+            "--k",
+            str(args.candidate_k),
+        ]
+    )
+    run_dirs = sorted(set(glob.glob(str(RUNS_DIR / f"drill{tag}-*"))) - before)
+    if not run_dirs:
+        raise RuntimeError(f"candidate phase produced no run dirs (tag {tag})")
+    labels = [str(Path(rd)) for rd in run_dirs]
+    n_rows = sum(
+        1
+        for rd in run_dirs
+        for label_file in Path(rd).glob("workers/inv-*/labels.jsonl")
+        for _ in label_file.open()
+    )
+    print(
+        f"[selfplay] iteration {k}: candidate campaign {len(run_dirs)} runs, "
+        f"{n_rows} label rows"
+    )
+    return labels, source_stores
+
+
 def _seq_phase(
     args,
     state: dict,
@@ -1796,6 +1937,45 @@ def main() -> None:
         "beats K=32 precision on policy-conditional labels)",
     )
     ap.add_argument(
+        "--candidate-sa-regex",
+        default=None,
+        help="enable the generic priority-candidate campaign and filter "
+        "normalized spell abilities with this regex (for example, "
+        "'Brave the Elements')",
+    )
+    ap.add_argument(
+        "--candidate-model-seats",
+        default=None,
+        help="optional comma-separated zero-based bridged-seat override; by default infer it per source run",
+    )
+    ap.add_argument(
+        "--candidate-points-per-iter",
+        type=int,
+        default=50,
+        help="maximum outcome-independent candidate points mined per iteration; "
+        "0 means all available points",
+    )
+    ap.add_argument(
+        "--candidate-k",
+        type=int,
+        default=32,
+        help="paired natural/forced completions per candidate window",
+    )
+    ap.add_argument(
+        "--candidate-frac",
+        type=float,
+        default=0.1,
+        help="candidate-loss share target passed to rl.py",
+    )
+    ap.add_argument(
+        "--candidate-w",
+        type=float,
+        default=None,
+        help="explicit candidate-loss weight; omit to calibrate it",
+    )
+    ap.add_argument("--candidate-calib-steps", type=int, default=50)
+    ap.add_argument("--candidate-margin", type=float, default=6.0)
+    ap.add_argument(
         "--drill-windows-only",
         action="store_true",
         help="recipe pin 2026-08-12: drill fork stores serve ONLY as "
@@ -2145,7 +2325,7 @@ def main() -> None:
                     _run([sys.executable, "-m", "anvil.store", "ingest", str(rd)])
             walls["gen"] = time.monotonic() - t0
 
-        def _campaign_track() -> tuple[list[str], list[str]]:
+        def _campaign_track() -> tuple[list[str], list[str], list[str], list[str]]:
             # ---- drill phase (M4 D3) + C-seq campaign (ADR-0054), both
             # phase-idempotent. Under --drill-windows-only the fork stores
             # serve ONLY as L_seq window sources (never the mixture) — the
@@ -2153,6 +2333,8 @@ def main() -> None:
             t0 = time.monotonic()
             dstores: list[str] = []
             sruns: list[str] = []
+            candidate_labels: list[str] = []
+            candidate_stores: list[str] = []
             camp_port = args.campaign_port or (args.port + 8)
             camp_w = args.campaign_workers or args.workers
             if args.drill_selection:
@@ -2165,6 +2347,27 @@ def main() -> None:
                         args, state, k, it_dir / "drill", port=camp_port, workers=camp_w
                     )
                     stores_rec.write_text(json.dumps(dstores))
+            if args.candidate_sa_regex is not None:
+                candidate_rec = it_dir / "candidate" / "runs.json"
+                if candidate_rec.exists():
+                    saved = json.loads(candidate_rec.read_text())
+                    candidate_labels = saved.get("labels", [])
+                    candidate_stores = saved.get("stores", [])
+                    print(f"[selfplay] iteration {k}: reusing candidate campaign")
+                else:
+                    candidate_labels, candidate_stores = _candidate_phase(
+                        args,
+                        state,
+                        k,
+                        it_dir / "candidate",
+                        [rd for rd in run_dirs if rd is not None],
+                        port=camp_port,
+                        workers=camp_w,
+                    )
+                    (it_dir / "candidate").mkdir(exist_ok=True)
+                    candidate_rec.write_text(
+                        json.dumps({"labels": candidate_labels, "stores": candidate_stores})
+                    )
             if args.seq_n:
                 if not args.drill_selection:
                     raise RuntimeError(
@@ -2186,7 +2389,7 @@ def main() -> None:
                     )
                     seq_rec.write_text(json.dumps(sruns))
             walls["campaign"] = time.monotonic() - t0
-            return dstores, sruns
+            return dstores, sruns, candidate_labels, candidate_stores
 
         if args.overlap_campaign and args.drill_selection:
             # gen ‖ (drill → campaign): both tracks serve ckpt_k, so the
@@ -2200,10 +2403,10 @@ def main() -> None:
                 f_gen = pool.submit(_gen_track)
                 f_camp = pool.submit(_campaign_track)
                 f_gen.result()
-                drill_stores, seq_runs = f_camp.result()
+                drill_stores, seq_runs, candidate_labels, candidate_stores = f_camp.result()
         else:
             _gen_track()
-            drill_stores, seq_runs = _campaign_track()
+            drill_stores, seq_runs, candidate_labels, candidate_stores = _campaign_track()
         t_gen = walls["gen"]
         # 09-27: this iteration's yielded seconds out of the wall budget; the
         # marker keeps a resumed iteration from counting its stores twice
@@ -2460,6 +2663,27 @@ def main() -> None:
                     else []
                 )
                 + (["--seq-w", str(state["seq_w"])] if seq_runs and state.get("seq_w") else [])
+                + (
+                    [
+                        "--candidate-labels",
+                        ",".join(candidate_labels),
+                        "--candidate-stores",
+                        ",".join(candidate_stores),
+                        "--candidate-frac",
+                        str(args.candidate_frac),
+                        "--candidate-calib-steps",
+                        str(args.candidate_calib_steps),
+                        "--candidate-margin",
+                        str(args.candidate_margin),
+                        *(
+                            ["--candidate-w", str(args.candidate_w)]
+                            if args.candidate_w is not None
+                            else []
+                        ),
+                    ]
+                    if candidate_labels and candidate_stores
+                    else []
+                )
                 # in-phase abort at 5x the iteration-mean guard (d6-run14:
                 # the runaway crossed 5x guard ~40% into the phase)
                 + (["--kl-abort", str(5 * args.guard_kl)] if args.guard_kl > 0 else [])
@@ -2486,6 +2710,12 @@ def main() -> None:
             # §6c anti-passivity basis (first attempts: chain-independent)
             census["casts_per_game"] = round(census.get("first_cast", 0) / gstats["games"], 2)
         rl = _rl_summary(train_dir)
+        candidate_telemetry_path = train_dir / "candidate_telemetry.json"
+        candidate_telemetry = (
+            json.loads(candidate_telemetry_path.read_text())
+            if candidate_telemetry_path.exists()
+            else None
+        )
         flags = []
         if census.get("fallback"):
             flags.append(f"fallbacks={census['fallback']}")
@@ -2583,6 +2813,7 @@ def main() -> None:
             "census": census,
             "games": gstats,
             "rl": rl,
+            **({"candidate": candidate_telemetry} if candidate_telemetry else {}),
             "flags": flags,
             "guard": guards,
         }
