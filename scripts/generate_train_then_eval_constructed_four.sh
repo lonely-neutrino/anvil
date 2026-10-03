@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Generate a four-deck constructed heuristic corpus, ingest and validate it,
-# train the behavior-cloning model, and run mirrored model-vs-heuristic
-# evaluation arms.
+# Generate a four-deck constructed heuristic corpus, train or reuse the
+# behavior-cloning model, evaluate it, and continue into multi-deck RL.
 #
 # The harness's built-in --pool mode reads the standard data/pool manifests.
 # This experiment instead creates a deterministic, balanced pair schedule over
@@ -19,7 +18,7 @@ cd "$ROOT"
 
 # ---------- experiment configuration ----------
 
-PYTHON="$ROOT/.venv/bin/python"
+PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 FORMAT="Constructed"
 DECK_DIR="${DECK_DIR:-${FORGE_USER_DIR:-$HOME/.forge}/decks/constructed}"
 DECKS=(
@@ -39,7 +38,7 @@ EMBED_BATCH="${EMBED_BATCH:-32}"
 REBUILD_POOL="${REBUILD_POOL:-0}"
 
 # These generation values can be overridden without editing the script.
-GEN_GAMES="${GEN_GAMES:-20000}"
+GEN_GAMES="${GEN_GAMES:-40000}"
 GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-10}"
 GEN_WORKERS="${GEN_WORKERS:-8}"
 GEN_CHUNK="${GEN_CHUNK:-10}"
@@ -51,17 +50,68 @@ RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 GEN_PURPOSE="${GEN_PURPOSE:-constructed-four-heur-${GEN_GAMES}-${RUN_STAMP}}"
 TRAIN_OUT="${TRAIN_OUT:-data/training/constructed-four-auto-${RUN_STAMP}}"
 EVAL_PREFIX="${EVAL_PREFIX:-constructed-four-auto-${RUN_STAMP}}"
-# 4000 games / 16 ordered matchups = 250 games per matchup. Five games per
+BC_STEPS="${BC_STEPS:-200000}"
+BC_CKPT_INPUT="${BC_CKPT:-}"
+# 4000 games / 16 ordered matchups = 250 games per matchup. Ten games per
 # scheduled pair makes that division exact.
 EVAL_GAMES="${EVAL_GAMES:-4000}"
-EVAL_GAMES_PER_PAIR="${EVAL_GAMES_PER_PAIR:-5}"
-EVAL_WORKERS="${EVAL_WORKERS:-4}"
+EVAL_GAMES_PER_PAIR="${EVAL_GAMES_PER_PAIR:-10}"
+EVAL_WORKERS="${EVAL_WORKERS:-12}"
+EVAL_MAX_BATCH="${EVAL_MAX_BATCH:-16}"
+EVAL_BATCH_WINDOW_MS="${EVAL_BATCH_WINDOW_MS:-12}"
+EVAL_LAUNCH_DELAY_MS="${EVAL_LAUNCH_DELAY_MS:-2000}"
 EVAL_SEED_BASE="${EVAL_SEED_BASE:-$GEN_SEED_BASE}"
-PORT="${PORT:-50070}"
+EVAL_PORT="${EVAL_PORT:-${PORT:-50070}}"
+EVAL_PORT_2="${EVAL_PORT_2:-50071}"
+
+RL_NAME="${RL_NAME:-constructed-four-rl-${RUN_STAMP}}"
+# The historical first RL stage used 20 x 2,000 games, which produces a
+# 20,000-line schedule (1,250 lines per ordered matchup).
+RL_ITERATIONS="${RL_ITERATIONS:-20}"
+RL_GAMES="${RL_GAMES:-2000}"
+RL_GAMES_PER_PAIR="${RL_GAMES_PER_PAIR:-2}"
+RL_WORKERS="${RL_WORKERS:-12}"
+RL_CHUNK="${RL_CHUNK:-30}"
+RL_PORT="${RL_PORT:-50077}"
+RL_PORT_2="${RL_PORT_2:-50078}"
+RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
+RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
+RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-2000}"
+RL_SEED_BASE="${RL_SEED_BASE:-$((GEN_SEED_BASE + 1))}"
+RL_HEUR_FRAC="${RL_HEUR_FRAC:-0.5}"
+RL_REPLAY="${RL_REPLAY:-4}"
+RL_FRESH_WEIGHT="${RL_FRESH_WEIGHT:-1.0}"
+RL_REPLAY_WEIGHT="${RL_REPLAY_WEIGHT:-0.33}"
+RL_LEARNER_WORKERS="${RL_LEARNER_WORKERS:-0}"
+RL_EPOCHS="${RL_EPOCHS:-1}"
+RL_LR="${RL_LR:-1e-5}"
+RL_ENT_WEIGHT="${RL_ENT_WEIGHT:-0.003}"
+RL_ENT_FLOOR="${RL_ENT_FLOOR:-0.08}"
+RL_VALUE_WEIGHT="${RL_VALUE_WEIGHT:-0.5}"
+RL_TRAJ_PER_STEP="${RL_TRAJ_PER_STEP:-4}"
+RL_PENALTY="${RL_PENALTY:-0.01}"
+RL_PENALTY_GROUPING="${RL_PENALTY_GROUPING:-first}"
+RL_GUARD_KL="${RL_GUARD_KL:-2.0}"
+RL_GUARD_ENT_MULT="${RL_GUARD_ENT_MULT:-10.0}"
+RL_GUARD_VETO_MULT="${RL_GUARD_VETO_MULT:-50.0}"
+RL_GUARD_CASTS_FLOOR="${RL_GUARD_CASTS_FLOOR:-0.2}"
+RL_ARMS_EVERY="${RL_ARMS_EVERY:-10}"
+RL_ARMS_GAMES="${RL_ARMS_GAMES:-4000}"
+RL_ARMS_SEED_BASE="${RL_ARMS_SEED_BASE:-20260710}"
+RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+RL_PAIRS="${RL_PAIRS:-data/pool/custom/constructed-four-rl-pairs.txt}"
+ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/constructed-four-arms-pairs-800.txt}"
 
 shopt -s nullglob
 
 [[ -x "$PYTHON" ]] || { echo "missing $PYTHON" >&2; exit 1; }
+
+if [[ -n "$BC_CKPT_INPUT" ]]; then
+    [[ -f "$BC_CKPT_INPUT" ]] || {
+        echo "missing reusable BC checkpoint $BC_CKPT_INPUT" >&2
+        exit 1
+    }
+fi
 
 if [[ -z "${FORGE_DIR:-}" ]]; then
     export FORGE_DIR="$ROOT/../forge"
@@ -76,6 +126,10 @@ for deck in "${DECKS[@]}"; do
 done
 
 [[ ! -e "$TRAIN_OUT" ]] || { echo "output already exists: $TRAIN_OUT" >&2; exit 1; }
+[[ ! -e "$ROOT/data/training/$RL_NAME" ]] || {
+    echo "RL output already exists: $ROOT/data/training/$RL_NAME" >&2
+    exit 1
+}
 
 # ---------- custom pool and embedding cache ----------
 
@@ -170,18 +224,49 @@ port_open() {
         >/dev/null 2>&1
 }
 
-port_open "$PORT" && {
-    echo "port $PORT is already in use; choose another PORT" >&2
+[[ "$EVAL_PORT" != "$EVAL_PORT_2" ]] || {
+    echo "EVAL_PORT and EVAL_PORT_2 must be different" >&2
     exit 1
 }
 
-# A unique purpose keeps a rerun from silently selecting an older generation
-# directory. If the caller supplied a purpose that already exists, stop and
-# make that choice explicit instead.
-existing_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
-if [[ -n "${existing_runs[0]:-}" ]]; then
-    echo "generation purpose already has run directories: $GEN_PURPOSE" >&2
+port_open "$EVAL_PORT" && {
+    echo "port $EVAL_PORT is already in use; choose another EVAL_PORT" >&2
     exit 1
+}
+port_open "$EVAL_PORT_2" && {
+    echo "port $EVAL_PORT_2 is already in use; choose another EVAL_PORT_2" >&2
+    exit 1
+}
+[[ "$EVAL_PORT" != "$RL_PORT" && "$EVAL_PORT" != "$RL_PORT_2" ]] || {
+    echo "evaluation and RL ports must be different" >&2
+    exit 1
+}
+[[ "$EVAL_PORT_2" != "$RL_PORT" && "$EVAL_PORT_2" != "$RL_PORT_2" ]] || {
+    echo "evaluation and RL ports must be different" >&2
+    exit 1
+}
+[[ "$RL_PORT" != "$RL_PORT_2" ]] || {
+    echo "RL_PORT and RL_PORT_2 must be different" >&2
+    exit 1
+}
+port_open "$RL_PORT" && {
+    echo "port $RL_PORT is already in use; choose another RL_PORT" >&2
+    exit 1
+}
+port_open "$RL_PORT_2" && {
+    echo "port $RL_PORT_2 is already in use; choose another RL_PORT_2" >&2
+    exit 1
+}
+
+if [[ -z "$BC_CKPT_INPUT" ]]; then
+    # A unique purpose keeps a rerun from silently selecting an older
+    # generation directory. If the caller supplied a purpose that already
+    # exists, stop and make that choice explicit instead.
+    existing_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
+    if [[ -n "${existing_runs[0]:-}" ]]; then
+        echo "generation purpose already has run directories: $GEN_PURPOSE" >&2
+        exit 1
+    fi
 fi
 
 require_balanced_total() {
@@ -206,6 +291,75 @@ make_pairs() {
         --pairs "$n_pairs" \
         --seed "$seed" \
         --decks "${DECKS[@]}"
+}
+
+prepare_schedule() {
+    local path="$1" required_pairs="$2" seed="$3" label="$4"
+    if (( required_pairs <= 0 || required_pairs % MATCHUP_COUNT != 0 )); then
+        echo "$label schedule requires a positive pair count divisible by " \
+            "$MATCHUP_COUNT; got $required_pairs" >&2
+        exit 1
+    fi
+    if [[ -e "$path" ]]; then
+        [[ -f "$path" ]] || {
+            echo "$label schedule path is not a regular file: $path" >&2
+            exit 1
+        }
+        local available
+        available="$(wc -l < "$path")"
+        if (( available < required_pairs )); then
+            echo "$label schedule $path has $available lines but needs at least " \
+                "$required_pairs; choose another path or replace it deliberately" >&2
+            exit 1
+        fi
+        echo "[pipeline] using existing $label schedule $path ($available lines)"
+    else
+        echo "[pipeline] creating $label schedule $path ($required_pairs lines)"
+        make_pairs "$path" "$required_pairs" "$seed"
+    fi
+
+    "$PYTHON" - "$path" "$required_pairs" "$label" "${DECKS[@]}" <<'PY'
+import sys
+from collections import Counter
+from pathlib import Path
+
+path = Path(sys.argv[1])
+required = int(sys.argv[2])
+label = sys.argv[3]
+decks = sys.argv[4:]
+expected = [(a, b) for a in decks for b in decks]
+lines = path.read_text().splitlines()
+prefix = lines[:required]
+counts = Counter()
+bad = []
+for number, line in enumerate(prefix, 1):
+    fields = line.split("\t")
+    if len(fields) != 2:
+        bad.append((number, line))
+        continue
+    counts[tuple(fields)] += 1
+
+missing = [pair for pair in expected if pair not in counts]
+unexpected = sorted(set(counts) - set(expected))
+values = [counts[pair] for pair in expected]
+if (
+    len(prefix) != required
+    or bad
+    or missing
+    or unexpected
+    or len(set(values)) != 1
+):
+    raise SystemExit(
+        f"{label} schedule prefix is not balanced: required={required}, "
+        f"counts={dict(counts)}, missing={missing}, unexpected={unexpected}, "
+        f"malformed={bad[:3]}"
+    )
+
+print(
+    f"[pipeline] {label} schedule: {required} lines, "
+    f"{len(expected)} ordered matchups x {values[0]} lines"
+)
+PY
 }
 
 validate_run_matchups() {
@@ -253,17 +407,40 @@ PY
 
 GEN_PAIRS="$(mktemp "${TMPDIR:-/tmp}/constructed-four-gen-pairs.XXXXXX")"
 EVAL_PAIRS="$(mktemp "${TMPDIR:-/tmp}/constructed-four-eval-pairs.XXXXXX")"
-SERVER_PID=""
+SERVER_PIDS=()
+
+stop_servers() {
+    for pid in "${SERVER_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -INT "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "${SERVER_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    SERVER_PIDS=()
+}
 
 cleanup() {
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill -INT "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
+    stop_servers
     rm -f -- "$GEN_PAIRS" "$EVAL_PAIRS"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+
+GEN_RUN=""
+STORE=""
+CKPT=""
+BC_REPORT=""
+
+if [[ -n "$BC_CKPT_INPUT" ]]; then
+    # A supplied BC checkpoint is assumed to have already been generated,
+    # trained, and evaluated by its producing pipeline.
+    mkdir -p "$TRAIN_OUT"
+    CKPT="$BC_CKPT_INPUT"
+    echo "[pipeline] reusing BC checkpoint $CKPT"
+    echo "[pipeline] skipping heuristic generation, BC training, and BC evaluation"
+else
 
 # ---------- generation ----------
 
@@ -340,7 +517,7 @@ echo "[pipeline] training from $STORE"
     --batch 32 \
     --lr 3e-4 \
     --warmup 500 \
-    --steps 200000 \
+    --steps "$BC_STEPS" \
     --pass-weight 0.1 \
     --workers 1 \
     --eval-every 1000 \
@@ -357,34 +534,55 @@ require_balanced_total "EVAL_GAMES" "$EVAL_GAMES" "$EVAL_GAMES_PER_PAIR"
 EVAL_N_PAIRS=$((EVAL_GAMES / EVAL_GAMES_PER_PAIR))
 make_pairs "$EVAL_PAIRS" "$EVAL_N_PAIRS" "$EVAL_SEED_BASE"
 
-echo "[pipeline] starting model server on port $PORT"
+echo "[pipeline] starting model servers on ports $EVAL_PORT and $EVAL_PORT_2"
 SERVER_LOG="$TRAIN_OUT/eval-server.log"
-"$PYTHON" -u -m anvil.bridge.server \
-    --mode model \
-    --ckpt "$CKPT" \
-    --port "$PORT" \
-    --device cuda:0 \
-    --pass-delta 0.0 \
-    >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
+SERVER_LOG_2="$TRAIN_OUT/eval-server-2.log"
+EVAL_PORTS=("$EVAL_PORT" "$EVAL_PORT_2")
 
-ready=0
-for ((i = 0; i < 120; i++)); do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        tail -80 "$SERVER_LOG" >&2 || true
-        echo "model server exited during startup" >&2
-        exit 1
+for i in "${!EVAL_PORTS[@]}"; do
+    eval_port="${EVAL_PORTS[$i]}"
+    if (( i == 0 )); then
+        eval_log="$SERVER_LOG"
+    else
+        eval_log="$SERVER_LOG_2"
     fi
-    if port_open "$PORT"; then
-        ready=1
-        break
-    fi
-    sleep 1
+    "$PYTHON" -u -m anvil.bridge.server \
+        --mode model \
+        --ckpt "$CKPT" \
+        --port "$eval_port" \
+        --device cuda:0 \
+        --pass-delta 0.0 \
+        --max-batch "$EVAL_MAX_BATCH" \
+        --batch-window-ms "$EVAL_BATCH_WINDOW_MS" \
+        >"$eval_log" 2>&1 &
+    SERVER_PIDS+=("$!")
 done
-((ready == 1)) || {
-    echo "server did not open port; see $SERVER_LOG" >&2
-    exit 1
-}
+
+for i in "${!EVAL_PORTS[@]}"; do
+    eval_port="${EVAL_PORTS[$i]}"
+    if (( i == 0 )); then
+        eval_log="$SERVER_LOG"
+    else
+        eval_log="$SERVER_LOG_2"
+    fi
+    ready=0
+    for ((wait_i = 0; wait_i < 120; wait_i++)); do
+        if ! kill -0 "${SERVER_PIDS[$i]}" 2>/dev/null; then
+            tail -80 "$eval_log" >&2 || true
+            echo "model server exited during startup; see $eval_log" >&2
+            exit 1
+        fi
+        if port_open "$eval_port"; then
+            ready=1
+            break
+        fi
+        sleep 1
+    done
+    (( ready == 1 )) || {
+        echo "model server did not open port; see $eval_log" >&2
+        exit 1
+    }
+done
 
 EVAL_RUNS=()
 
@@ -399,8 +597,9 @@ run_eval() {
         --games "$EVAL_GAMES" \
         --workers "$EVAL_WORKERS" \
         --chunk 10 \
+        --launch-delay-ms "$EVAL_LAUNCH_DELAY_MS" \
         --calibrated \
-        --bridge "grpc:localhost:$PORT" \
+        --bridges "grpc:localhost:$EVAL_PORT" "grpc:localhost:$EVAL_PORT_2" \
         --bridge-seats "$seat" \
         --obs \
         --census \
@@ -420,15 +619,105 @@ run_eval() {
 run_eval 0
 run_eval 1
 
-REPORT="$TRAIN_OUT/arms-report.json"
+BC_REPORT="$TRAIN_OUT/arms-report.json"
 "$PYTHON" scripts/arms_report.py \
     --arm "bc=${EVAL_RUNS[0]},${EVAL_RUNS[1]}" \
-    --out "$REPORT"
+    --out "$BC_REPORT"
+
+cleanup
+trap - EXIT INT TERM
+
+fi
+
+# ---------- RL self-play ----------
+
+if (( RL_ITERATIONS <= 0 )); then
+    echo "RL_ITERATIONS must be positive; got $RL_ITERATIONS" >&2
+    exit 1
+fi
+# RL_GAMES=2000 and RL_GAMES_PER_PAIR=2 do not divide evenly across 16
+# matchups in a single iteration (1,000 schedule lines is odd per matchup).
+# Therefore the invariant is checked over the complete RL schedule: for the
+# historical 20-iteration default this is 20,000 lines = 1,250 per matchup.
+RL_TOTAL_GAMES=$((RL_ITERATIONS * RL_GAMES))
+require_balanced_total "RL total games" "$RL_TOTAL_GAMES" "$RL_GAMES_PER_PAIR"
+RL_N_PAIRS=$((RL_TOTAL_GAMES / RL_GAMES_PER_PAIR))
+prepare_schedule "$RL_PAIRS" "$RL_N_PAIRS" "$RL_SEED_BASE" "RL"
+
+# The harness default is five games per arms schedule line. Keep the arms
+# schedule balanced over all 16 ordered matchups and let selfplay reuse it at
+# each configured arms checkpoint.
+ARMS_GAMES_PER_PAIR=5
+if (( RL_ARMS_EVERY > 0 )); then
+    require_balanced_total "RL_ARMS_GAMES" "$RL_ARMS_GAMES" "$ARMS_GAMES_PER_PAIR"
+    ARMS_N_PAIRS=$((RL_ARMS_GAMES / ARMS_GAMES_PER_PAIR))
+    prepare_schedule "$ARMS_PAIRS" "$ARMS_N_PAIRS" "$RL_ARMS_SEED_BASE" "arms"
+fi
+
+echo "[pipeline] starting RL loop $RL_NAME"
+RL_ARGS=(
+    --name "$RL_NAME"
+    --ckpt "$CKPT"
+    --pairs-file "$RL_PAIRS"
+    --format "$FORMAT"
+    --pool-version "$POOL_VERSION"
+    --iterations "$RL_ITERATIONS"
+    --games "$RL_GAMES"
+    --games-per-pair "$RL_GAMES_PER_PAIR"
+    --workers "$RL_WORKERS"
+    --chunk "$RL_CHUNK"
+    --port "$RL_PORT"
+    --ports "$RL_PORT" "$RL_PORT_2"
+    --max-batch "$RL_MAX_BATCH"
+    --batch-window-ms "$RL_BATCH_WINDOW_MS"
+    --launch-delay-ms "$RL_LAUNCH_DELAY_MS"
+    --seed-base "$RL_SEED_BASE"
+    --temperature 1.0
+    --replay "$RL_REPLAY"
+    --fresh-weight "$RL_FRESH_WEIGHT"
+    --replay-weight "$RL_REPLAY_WEIGHT"
+    --rl-workers "$RL_LEARNER_WORKERS"
+    --epochs "$RL_EPOCHS"
+    --lr "$RL_LR"
+    --ent-weight "$RL_ENT_WEIGHT"
+    --ent-floor "$RL_ENT_FLOOR"
+    --rl-seg 64
+    --guard-kl "$RL_GUARD_KL"
+    --guard-ent-mult "$RL_GUARD_ENT_MULT"
+    --guard-veto-mult "$RL_GUARD_VETO_MULT"
+    --guard-casts-floor "$RL_GUARD_CASTS_FLOOR"
+    --penalty "$RL_PENALTY"
+    --penalty-grouping "$RL_PENALTY_GROUPING"
+    --heur-frac "$RL_HEUR_FRAC"
+    --value-weight "$RL_VALUE_WEIGHT"
+    --traj-per-step "$RL_TRAJ_PER_STEP"
+    --arms-every "$RL_ARMS_EVERY"
+    --arms-pairs "$ARMS_PAIRS"
+    --arms-games "$RL_ARMS_GAMES"
+    --arms-seed-base "$RL_ARMS_SEED_BASE"
+    --reask
+)
+
+if [[ "$RL_NO_INHIBIT" == "1" ]]; then
+    RL_ARGS+=(--no-inhibit)
+fi
+
+"$PYTHON" -m anvil.training.selfplay "${RL_ARGS[@]}"
 
 echo "[pipeline] pool manifest: $POOL_MANIFEST"
 echo "[pipeline] embedding cache: $EMBED"
-echo "[pipeline] generated run: $GEN_RUN"
-echo "[pipeline] trajectory store: $STORE"
+if [[ -n "$GEN_RUN" ]]; then
+    echo "[pipeline] generated run: $GEN_RUN"
+    echo "[pipeline] trajectory store: $STORE"
+else
+    echo "[pipeline] generated run: skipped (BC_CKPT supplied)"
+    echo "[pipeline] trajectory store: skipped (BC_CKPT supplied)"
+fi
 echo "[pipeline] checkpoint: $CKPT"
-echo "[pipeline] report: $REPORT"
-echo "[pipeline] server log: $SERVER_LOG"
+if [[ -n "$BC_REPORT" ]]; then
+    echo "[pipeline] BC report: $BC_REPORT"
+    echo "[pipeline] server logs: $SERVER_LOG and $SERVER_LOG_2"
+else
+    echo "[pipeline] BC report: skipped (BC_CKPT supplied)"
+fi
+echo "[pipeline] RL output: $ROOT/data/training/$RL_NAME"
