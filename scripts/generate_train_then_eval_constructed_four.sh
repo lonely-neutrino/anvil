@@ -667,7 +667,8 @@ RL_ARGS=(
     --workers "$RL_WORKERS"
     --chunk "$RL_CHUNK"
     --port "$RL_PORT"
-    --ports "$RL_PORT" "$RL_PORT_2"
+    --servers 2
+    --device cuda:0
     --max-batch "$RL_MAX_BATCH"
     --batch-window-ms "$RL_BATCH_WINDOW_MS"
     --launch-delay-ms "$RL_LAUNCH_DELAY_MS"
