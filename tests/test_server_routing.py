@@ -51,7 +51,7 @@ def test_candidate_window_routes_to_drill_backend():
             self.calls = 0
             self.counts = Counter()
 
-        def answer(self, req, _header, _seed):
+        def answer(self, req, _header, _seed, greedy=False):
             self.calls += 1
             return pb.DecisionResponse(decision_seq=req.decision_seq)
 

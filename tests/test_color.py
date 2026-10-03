@@ -2,17 +2,17 @@
 
 import torch
 
-from anvil.policy.sampling import make_noise, mu_record
 from anvil.bridge.featurize import TAG_TASK
 from anvil.bridge.server import MODEL_TAGS
+from anvil.policy.sampling import make_noise, mu_record
 from anvil.training.dataset import (
     COLOR_CLASSES,
     COLOR_INDEX,
-    TASKS,
     T_MAX,
+    TASKS,
     X_CLASSES,
-    color_class,
     collate,
+    color_class,
 )
 from anvil.training.rl import apply_mu_labels, composite_entropy, composite_logp, mu_matches
 

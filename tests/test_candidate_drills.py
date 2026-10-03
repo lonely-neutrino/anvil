@@ -170,6 +170,8 @@ def test_featurizer_keeps_duplicate_host_aliases_for_candidate_joins(monkeypatch
     monkeypatch.setattr(wire, "assemble", lambda *args, **kwargs: fake_out)
     feat = wire.Featurizer.__new__(wire.Featurizer)
     feat.sa_vocab = SaVocab()
+    feat.abil = None
+    feat.ability_table = None
     feat.embed = type("Embed", (), {"row": staticmethod(lambda _name: 0)})()
 
     dec = {

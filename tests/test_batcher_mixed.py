@@ -18,7 +18,15 @@ class _Net:
     def __init__(self):
         self.calls = []
 
-    def act(self, batch, pass_delta=0.0, noise=None, temperature=1.0, sched_decode=False):
+    def act(
+        self,
+        batch,
+        pass_delta=0.0,
+        noise=None,
+        temperature=1.0,
+        sched_decode=False,
+        forced_choice=None,
+    ):
         b = batch["entities"].shape[0]
         self.calls.append((b, noise is not None))
         out = {"choice": torch.zeros(b, dtype=torch.int64), "n_ent": 1}
