@@ -480,7 +480,13 @@ def launch(a) -> Path:
     run_dir = RUNS_DIR / run_id
     (run_dir / "workers").mkdir(parents=True)
 
-    pool_fields = {}
+    # Explicit deck runs have no pool manifest from which to derive this;
+    # preserve the caller's provenance pin just as explicit pair runs do.
+    pool_fields = (
+        {"pool_version": a.pool_version}
+        if getattr(a, "pool_version", None)
+        else {}
+    )
     if getattr(a, "pairs_file", None):
         # D8 arms: an explicit pair schedule (e.g. valpair-only held-out
         # matchups) replaces the pool-derived one; same worker mechanism.
@@ -495,8 +501,6 @@ def launch(a) -> Path:
             "n_pairs": n_lines,
             "games_per_pair": a.games_per_pair,
         }
-        if getattr(a, "pool_version", None):
-            pool_fields["pool_version"] = a.pool_version
         print(f"[harness] explicit pairs file: {n_lines} pairs x {a.games_per_pair} games")
     if getattr(a, "drill_file", None):
         # M4 D2 drill mode: the run dir carries its own copy (provenance +

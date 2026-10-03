@@ -37,6 +37,15 @@ GEN_BRIDGE="${GEN_BRIDGE:-local-random}"
 GEN_TAGS="${GEN_TAGS:-none}"
 GEN_SEED_BASE="${GEN_SEED_BASE:-$(date +%Y%m%d)}"
 
+BC_BATCH="${BC_BATCH:-32}"
+BC_LR="${BC_LR:-3e-4}"
+BC_WARMUP="${BC_WARMUP:-500}"
+BC_STEPS="${BC_STEPS:-200000}"
+BC_WORKERS="${BC_WORKERS:-1}"
+BC_EVAL_EVERY="${BC_EVAL_EVERY:-1000}"
+BC_EVAL_BATCHES="${BC_EVAL_BATCHES:-20}"
+BC_FINAL_EVAL_BATCHES="${BC_FINAL_EVAL_BATCHES:-100}"
+
 RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
 GEN_PURPOSE="${GEN_PURPOSE:-mono-red-aggro-heur-${GEN_GAMES}-${RUN_STAMP}}"
 TRAIN_OUT="${TRAIN_OUT:-data/training/mono-red-aggro-bc-${RUN_STAMP}}"
@@ -60,6 +69,8 @@ RL_ARMS_EVERY="${RL_ARMS_EVERY:-5}"
 RL_ARMS_GAMES="${RL_ARMS_GAMES:-500}"
 RL_ARMS_SEED_BASE="${RL_ARMS_SEED_BASE:-20260710}"
 RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+RL_TRAIN_WORKERS="${RL_TRAIN_WORKERS:-4}"
+RL_TRAJ_PER_STEP="${RL_TRAJ_PER_STEP:-4}"
 ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/mono-red-aggro-pairs.txt}"
 
 shopt -s nullglob
@@ -226,15 +237,15 @@ echo "[pipeline] training BC model into $TRAIN_OUT"
     --embed "$EMBED" \
     --pool-manifest "$POOL_MANIFEST" \
     --out "$TRAIN_OUT" \
-    --batch 32 \
-    --lr 3e-4 \
-    --warmup 500 \
-    --steps 200000 \
+    --batch "$BC_BATCH" \
+    --lr "$BC_LR" \
+    --warmup "$BC_WARMUP" \
+    --steps "$BC_STEPS" \
     --pass-weight 0.1 \
-    --workers 1 \
-    --eval-every 1000 \
-    --eval-batches 20 \
-    --final-eval-batches 100 \
+    --workers "$BC_WORKERS" \
+    --eval-every "$BC_EVAL_EVERY" \
+    --eval-batches "$BC_EVAL_BATCHES" \
+    --final-eval-batches "$BC_FINAL_EVAL_BATCHES" \
     --seed 0
 
 BC_CKPT="$ROOT/$TRAIN_OUT/last.pt"
@@ -364,7 +375,7 @@ RL_ARGS=(
     --replay 4
     --fresh-weight 1.0
     --replay-weight 0.33
-    --rl-workers 4
+    --rl-workers "$RL_TRAIN_WORKERS"
     --epochs 1
     --lr 1e-5
     --ent-weight 0.003
@@ -378,7 +389,7 @@ RL_ARGS=(
     --penalty-grouping first
     --heur-frac "$RL_HEUR_FRAC"
     --value-weight 0.5
-    --traj-per-step 4
+    --traj-per-step "$RL_TRAJ_PER_STEP"
     --arms-every "$RL_ARMS_EVERY"
     --arms-pairs "$ARMS_PAIRS"
     --arms-games "$RL_ARMS_GAMES"
