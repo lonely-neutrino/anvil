@@ -34,7 +34,7 @@ log() { echo "$(date -Iseconds) $*" | tee -a "$OUT/queue.log"; }
 JAR=$OUT/forge-baselines.jar
 if [[ ! -f "$JAR" ]]; then
   log "building the baseline jar from $FORK ($(git -C "$FORK" rev-parse --short HEAD))"
-  (cd "$FORK" && nice -n 19 ~/.local/opt/maven/bin/mvn -q -P windows-linux -pl forge-gui-desktop -am package -DskipTests) \
+  (cd "$FORK" && nice -n 19 ~/.local/opt/maven/bin/mvn -q -pl forge-gui-desktop -am package -DskipTests) \
     >> "$OUT/build.log" 2>&1 || { log "jar build FAILED"; exit 1; }
   cp "$(ls -t "$FORK"/forge-gui-desktop/target/*-jar-with-dependencies.jar | head -1)" "$JAR"
   echo "$(git -C "$FORK" rev-parse HEAD)" > "$OUT/jar.commit"

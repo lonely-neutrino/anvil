@@ -72,7 +72,7 @@ export FORGE_DIR=$PWD/forge
 ```
 
 ```bash
-cd forge && mvn -P windows-linux -pl forge-gui-desktop -am package -DskipTests
+cd forge && mvn -pl forge-gui-desktop -am package -DskipTests
 ```
 
 The jar lands in `forge-gui-desktop/target/*-jar-with-dependencies.jar`. Anvil finds the fork

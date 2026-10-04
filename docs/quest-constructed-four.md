@@ -42,7 +42,7 @@ module load maven/<available-version>
 cd /projects/<account>/<netid>/mtg-ai
 git clone --filter=blob:none https://github.com/Tyrathalis/forge.git
 cd forge
-mvn -P windows-linux -pl forge-gui-desktop -am package -DskipTests
+mvn -pl forge-gui-desktop -am package -DskipTests
 ```
 
 The expected jar is under
