@@ -2023,3 +2023,20 @@ record.*
   **Next (ADR-0119 step 2):** the Ante re-measure against `settings-stopgrad-t3e6/iter-019` (the
   ledger re-aggregation, then the values re-scored), and the shuffle decision record on the fork for
   draw coverage. The baseline reads run first, already queued (`after-pass4` step 3).
+
+- **2026-10-03 (23:00) — THE EXACT CAST-TARGET PLAN MASK IS BUILT BEHIND ITS ROLLOUT GATE.**
+  Forge's `-targetmask legal-plans` path enumerates complete target sequences from
+  `TargetRestrictions.getAllCandidates` plus stack abilities, across target nodes and X=0..16,
+  with four-target / 4,096-plan / 50,000-state bounds and scratch-RNG/state restoration. Priority
+  options carry additive schema-v3 `tc`/`tp` fields; `peekPriority` does not. Anvil retains the
+  existing `(row, normalized SA)` and `ak` candidate identity while carrying exact wire-option and
+  concrete-target realizations underneath it. Candidate, target-prefix and X masks are shared by
+  `act()` and `forward()`, so sampled mu and RL recomputation see one support; forced asks restrict
+  the union to their exact wire option. `PAYRESCUE`, target-dependent `unpayable`, reask and
+  `-vetofallback heuristic` remain separate. Old observations omit the tensors and take the old
+  model path. **Smoke:** one Constructed game on the rebuilt merged jar, 2,474 priority options,
+  2,474 complete / zero fallback, 2,829 plans, max eight plans/option; a target-bearing forced sample
+  returned its exact concrete plan, and sampled target/X logp matched forward recomputation (0 and
+  −3.0841825 vs 0 and −3.0841823). Python: 369 passed / 44 skipped before the final compatibility
+  rerun; Forge desktop package passes. **Not default-on yet:** the heuristic-label agreement scan,
+  timing, flag-off forkcheck, flag-on replay parity and paired read remain the registered gates.

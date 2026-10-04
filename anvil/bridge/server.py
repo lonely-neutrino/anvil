@@ -617,6 +617,18 @@ class ModelBackend:
             # the mu record and answer path need nothing special.
             self.counts["reask"] += 1
         ex, aux = self.feat.example(dec, header, task)
+        if task == "priority" and any("tc" in o for o in dec.get("opts") or []):
+            opts = dec.get("opts") or []
+            self.counts["target_mask_windows"] += 1
+            self.counts["target_mask_options"] += len(opts)
+            self.counts["target_mask_complete"] += sum(int(o.get("tc", 0)) == 1 for o in opts)
+            self.counts["target_mask_plans"] += sum(len(o.get("tp") or []) for o in opts)
+            self.counts["target_mask_zero"] += sum(
+                int(o.get("tc", 0)) == 1 and not (o.get("tp") or []) for o in opts
+            )
+            for o in opts:
+                if int(o.get("tc", 0)) != 1:
+                    self.counts[f"target_mask_fallback:{o.get('tr', 'unknown')}"] += 1
         forced_choice = None
         forced_wire_option = None
         forced_request = bool(req.force_option)
@@ -647,6 +659,21 @@ class ModelBackend:
             # dedup row; returning cand_first_opt here would silently rewrite
             # a request for the second copy into the first copy.
             forced_wire_option = wire
+            # Canonical candidates may merge several wire options. A forced
+            # ask must use only the exact option's plans, not their natural
+            # union. Unsupported wires retain legacy broad targeting.
+            if "tp_enforce" in ex:
+                ex["tp_forced_wire"] = self.torch.tensor(wire, dtype=self.torch.int64)
+                complete = bool((aux.get("target_wire_complete") or [])[wire])
+                ex["tp_enforce"] = self.torch.zeros_like(ex["tp_enforce"])
+                ex["tp_enforce"][forced_choice] = complete
+                ex["tp_cand_allow"] = self.torch.ones_like(ex["tp_cand_allow"])
+                if complete and not any(
+                    p["wire"] == wire for p in aux.get("target_plans") or []
+                ):
+                    ex["tp_cand_allow"][forced_choice] = False
+                    self.counts["force_target_no_plan"] += 1
+                    raise ValueError("forced option has no complete legal target plan")
             self.counts["force_requested"] += 1
         plan_key, plan_emit = self._plan_inject(ex, header, dec)
         sched_ctx = None
@@ -935,32 +962,63 @@ class ModelBackend:
             self.counts["pass"] += 1
             return cp  # spell_option 0 = pass (label-space convention)
         if forced_option is None:
-            cp.spell_option = aux["cand_first_opt"][choice] + 1
+            plan_out = out.get("tp_plan_idx")
+            plan_idx = int(plan_out[0]) if plan_out is not None else -1
+            plan_enforced = bool(out.get("tp_enforced", [False])[0])
+            if plan_enforced and plan_idx < 0:
+                self.counts["target_mask_missing_match"] += 1
+                raise ValueError("authoritative target mask produced no matching plan")
+            if plan_idx >= 0:
+                plans = aux.get("target_plans") or []
+                if plan_idx >= len(plans):
+                    raise ValueError("authoritative target plan index is outside item plan space")
+                cp.spell_option = int(plans[plan_idx]["wire"])
+            else:
+                cp.spell_option = aux["cand_first_opt"][choice] + 1
         else:
             cp.spell_option = int(forced_option)
         # SA-level model (D2+): the option index IS the chosen SA — the Java
         # ladder skips its kind/order rungs (shape->pay only). Host-level
         # checkpoints keep the full ladder.
         cp.host_level = self.n_sa == 0
-        n_ent, stop = int(out["n_ent"]), int(out["stop_idx"])
-        for t in range(out["tgt_picks"].shape[1]):
-            pick = int(out["tgt_picks"][0, t])
-            if pick == stop:
-                break
-            ref = cp.target_refs.add()
-            if pick < n_ent:
-                # dedup-group row -> deterministic representative (lowest id)
-                eid = aux["row_min_id"].get(pick, -1)
-                ref.entity = eid
-                if eid in aux["stack_ids"]:
-                    ref.ns = 1
-            else:
-                # 09-21 (ADR-0116): the pick is a model position (self first,
-                # then turn order) -> the registered seat through the aux
-                # seat list. The old `pick - n_ent` handed the engine a
-                # registered index from a self-first row: from seat 1 the
-                # model's "opponent" became itself.
-                ref.player = decode_player_ref(pick - n_ent, aux["seats"])
+        plan_out = out.get("tp_plan_idx")
+        plan_idx = int(plan_out[0]) if plan_out is not None else -1
+        plan_enforced = bool(out.get("tp_enforced", [False])[0])
+        if plan_enforced and plan_idx < 0:
+            self.counts["target_mask_missing_match"] += 1
+            raise ValueError("authoritative target mask has no concrete realization")
+        if plan_idx >= 0:
+            plans = aux.get("target_plans") or []
+            if plan_idx >= len(plans):
+                raise ValueError("authoritative target plan has no concrete realization")
+            plan = plans[plan_idx]
+            self.counts["target_mask_cast"] += 1
+            if forced_option is not None and int(plan["wire"]) != int(forced_option):
+                raise ValueError("forced target plan belongs to a different wire option")
+            for concrete in plan["refs"]:
+                ref = cp.target_refs.add()
+                if "p" in concrete:
+                    ref.player = int(concrete["p"])
+                else:
+                    ref.entity = int(concrete["e"])
+                    if int(concrete.get("ns", 0)) == 1:
+                        ref.ns = 1
+        else:
+            n_ent, stop = int(out["n_ent"]), int(out["stop_idx"])
+            for t in range(out["tgt_picks"].shape[1]):
+                pick = int(out["tgt_picks"][0, t])
+                if pick == stop:
+                    break
+                ref = cp.target_refs.add()
+                if pick < n_ent:
+                    # dedup-group row -> deterministic representative (lowest id)
+                    eid = aux["row_min_id"].get(pick, -1)
+                    ref.entity = eid
+                    if eid in aux["stack_ids"]:
+                        ref.ns = 1
+                else:
+                    # model position (self first, then turn order) -> registered seat
+                    ref.player = decode_player_ref(pick - n_ent, aux["seats"])
         x = int(out["x_cls"][0])
         cp.has_x = True
         # class 17 = ">16" overflow bucket; clamp + count (decision 2026-07-10)

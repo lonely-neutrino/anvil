@@ -613,7 +613,57 @@ class AnvilNet(nn.Module):
             # single-candidate mask gives logp 0 by construction (forced
             # answers carry no cast log-prob). Absent key = no narrowing.
             logits = logits.masked_fill(~allow, -1e9)
+        target_allow = batch.get("tp_cand_allow")
+        if target_allow is not None:
+            # A complete Forge enumeration with no plan proves that the
+            # canonical candidate has no target/X action the decoder can
+            # express. Fallback/legacy candidates remain open.
+            logits = logits.masked_fill(~target_allow, -1e9)
         return logits
+
+    @staticmethod
+    def _tp_start(batch: dict, choice: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Initial legal-plan set and per-item enforcement bit."""
+        enforce = batch["tp_enforce"].gather(1, choice.unsqueeze(1)).squeeze(1)
+        active = batch["tp_mask"] & (batch["tp_cand"] == choice.unsqueeze(1))
+        forced_wire = batch.get("tp_forced_wire")
+        if forced_wire is not None:
+            active = active & (
+                (forced_wire < 0).unsqueeze(1)
+                | (batch["tp_wire"] == forced_wire.unsqueeze(1))
+            )
+        return active, enforce & (choice > 0)
+
+    @staticmethod
+    def _tp_allowed(
+        batch: dict, active: torch.Tensor, slot: int, width: int
+    ) -> torch.Tensor:
+        token = batch["tp_tokens"][:, :, slot]
+        valid = active & (token >= 0) & (token < width)
+        counts = torch.zeros(
+            token.shape[0], width, dtype=torch.int64, device=token.device
+        )
+        counts.scatter_add_(1, token.clamp(min=0, max=width - 1), valid.long())
+        return counts > 0
+
+    @staticmethod
+    def _tp_advance(
+        batch: dict,
+        active: torch.Tensor,
+        slot: int,
+        pick: torch.Tensor,
+        advance: torch.Tensor,
+    ) -> torch.Tensor:
+        matches = batch["tp_tokens"][:, :, slot] == pick.unsqueeze(1)
+        return torch.where(advance.unsqueeze(1), active & matches, active)
+
+    @staticmethod
+    def _tp_x_allowed(batch: dict, active: torch.Tensor, width: int) -> torch.Tensor:
+        masks = batch["tp_xmask"]
+        return torch.stack(
+            [(((masks & (1 << x)) != 0) & active).any(1) for x in range(width)],
+            dim=1,
+        )
 
     def _sched_keys(
         self, ent_out: torch.Tensor, batch: dict
@@ -810,20 +860,34 @@ class AnvilNet(nn.Module):
         tgt_logits = []
         prev = torch.zeros_like(src_vec)
         d = keys.shape[-1]
+        tp_active = tp_enforce = None
+        if "tp_tokens" in batch:
+            tp_active, tp_enforce = self._tp_start(batch, lab)
         for t in range(self.t_max + 1):
             q = self.tgt_query(torch.cat([state, src_vec, prev], dim=-1)) + self.slot_emb[t]
             lg = (keys @ q.unsqueeze(-1)).squeeze(-1) / d**0.5
             lg = lg.masked_fill(pad, -1e9)
+            if tp_active is not None:
+                legal = self._tp_allowed(batch, tp_active, t, lg.shape[-1])
+                lg = lg.masked_fill(tp_enforce.unsqueeze(1) & ~legal, -1e9)
             tgt_logits.append(lg)
+            target_lab = batch["tgt_labels"][:, t]
+            if tp_active is not None:
+                tp_active = self._tp_advance(
+                    batch, tp_active, t, target_lab.clamp(min=0), target_lab >= 0
+                )
             if t < self.t_max:  # teacher-force the true pick into prev
-                lab = batch["tgt_labels"][:, t].clamp(min=0)
+                lab = target_lab.clamp(min=0)
                 picked = vecs.gather(
                     1, lab.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, vecs.shape[-1])
                 ).squeeze(1)
-                prev = prev + picked * (batch["tgt_labels"][:, t] >= 0).unsqueeze(-1)
+                prev = prev + picked * (target_lab >= 0).unsqueeze(-1)
         tgt_logits = torch.stack(tgt_logits, dim=1)  # (B, T+1, N+P+1)
 
         x_logits = self.x_head(torch.cat([state, src_vec], dim=-1))
+        if tp_active is not None:
+            x_legal = self._tp_x_allowed(batch, tp_active, x_logits.shape[-1])
+            x_logits = x_logits.masked_fill(tp_enforce.unsqueeze(1) & ~x_legal, -1e9)
 
         # one-field heads: ctx entity output (zeros when ctx_row = -1) + task emb
         ctx = ent_out.gather(
@@ -983,6 +1047,9 @@ class AnvilNet(nn.Module):
         prev = torch.zeros_like(src_vec)
         stopped = torch.zeros(ent_out.shape[0], dtype=torch.bool, device=ent_out.device)
         picks = []
+        tp_active = tp_enforce = None
+        if "tp_tokens" in batch:
+            tp_active, tp_enforce = self._tp_start(batch, choice)
         if noise is not None:
             # slot factors accumulate while un-stopped (the STOP pick itself
             # is a factor; post-stop slots are forced and contribute nothing)
@@ -992,6 +1059,9 @@ class AnvilNet(nn.Module):
             qv = self.tgt_query(torch.cat([state, src_vec, prev], dim=-1)) + self.slot_emb[t]
             lg = (keys @ qv.unsqueeze(-1)).squeeze(-1) / d**0.5
             lg = lg.masked_fill(kpad, -1e9)
+            if tp_active is not None:
+                legal = self._tp_allowed(batch, tp_active, t, lg.shape[-1])
+                lg = lg.masked_fill(tp_enforce.unsqueeze(1) & ~legal, -1e9)
             if noise is None:
                 raw = lg.argmax(-1)
             else:
@@ -1004,14 +1074,30 @@ class AnvilNet(nn.Module):
                 mu["ent_tgt"] += -(lp.exp() * lp).sum(-1) * active
             pick = torch.where(stopped, torch.full_like(raw, stop_idx), raw)
             picks.append(pick)
+            was_active = ~stopped
+            if tp_active is not None:
+                tp_active = self._tp_advance(batch, tp_active, t, pick, was_active)
             stopped = stopped | (pick == stop_idx)
             picked = vecs.gather(
                 1, pick.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, vecs.shape[-1])
             ).squeeze(1)
             prev = prev + picked  # STOP's vec is zeros; post-stop slots add nothing
 
-        x_cls = cat_pick(
-            self.x_head(torch.cat([state, src_vec], dim=-1)), noise and noise["x"], "x"
+        x_logits = self.x_head(torch.cat([state, src_vec], dim=-1))
+        if tp_active is not None:
+            x_legal = self._tp_x_allowed(batch, tp_active, x_logits.shape[-1])
+            x_logits = x_logits.masked_fill(tp_enforce.unsqueeze(1) & ~x_legal, -1e9)
+        x_cls = cat_pick(x_logits, noise and noise["x"], "x")
+        tp_plan_idx = torch.full_like(choice, -1)
+        if tp_active is not None:
+            x_ok = (batch["tp_xmask"] & (1 << x_cls.unsqueeze(1))) != 0
+            surviving = tp_active & x_ok
+            first = surviving.long().argmax(1)
+            tp_plan_idx = torch.where(tp_enforce & surviving.any(1), first, tp_plan_idx)
+        tp_enforced = (
+            tp_enforce
+            if tp_enforce is not None
+            else torch.zeros_like(choice, dtype=torch.bool)
         )
 
         ctx = ent_out.gather(
@@ -1067,6 +1153,8 @@ class AnvilNet(nn.Module):
             **sched,
             "tgt_picks": torch.stack(picks, dim=1),
             "x_cls": x_cls,
+            "tp_plan_idx": tp_plan_idx,
+            "tp_enforced": tp_enforced,
             "n_ent": n_ent,
             "stop_idx": stop_idx,
             "bool": bern_pick(self.bool_head(of_in).squeeze(-1), noise and noise["bool"], "bool"),

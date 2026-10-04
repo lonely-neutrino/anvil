@@ -207,6 +207,11 @@ What the flags mean, in the order you would change them:
   ~300 s), so 25 iterations is a night.
 - **`--reask`**: when the engine vetoes a chosen spell (unpayable, no legal target) the seat is
   re-asked with that option removed instead of passing. Keep it on.
+- **`--target-mask`**: opt into the schema-v3 legal-target-plan mask. Forge enumerates complete
+  target/X plans before inference; serving and RL recomputation restrict the decoder to those
+  plans while unsupported modal/oversized cases retain the legacy realizer path. This is a
+  trajectory-affecting flag and is preserved in `run.json` and periodic arms. For the four-deck
+  pipeline, set `TARGET_MASK=1` instead; its default remains 0 until the paired rollout gate closes.
 - **`--penalty 0.01 --penalty-grouping first`**: the small cost on vetoed attempts that keeps the
   veto rate from drifting; `--guard-veto-mult 4.0` halts the run if it drifts 4× anyway.
 - **`--arms-every 5`**: a 200-game read vs the heuristic every 5 iterations, per seat. It is a

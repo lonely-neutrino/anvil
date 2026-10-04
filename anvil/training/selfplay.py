@@ -515,10 +515,11 @@ def search_forge_args(a, ckpt: "str | None" = None) -> list[str]:
     floor. [] = the pre-wiring loop (no search directive). One derivation
     for generation and the with-lookahead arms, so both play the run's
     behavior policy."""
+    out = ["-targetmask", "legal-plans"] if getattr(a, "target_mask", False) else []
     recipe = (getattr(a, "search_recipe", "") or "").split()
     if not recipe:
-        return []
-    out = list(recipe)
+        return out
+    out.extend(recipe)
     if getattr(a, "search_alloc", "head") == "head" and ckpt:
         tau = alloc_tau_of(ckpt)
         if tau is not None:
@@ -2123,6 +2124,11 @@ def main() -> None:
         "to other -reask arms",
     )
     ap.add_argument(
+        "--target-mask",
+        action="store_true",
+        help="emit and enforce Forge legal target plans during generation and arms",
+    )
+    ap.add_argument(
         "--no-inhibit", action="store_true", help="skip the systemd-inhibit sleep holder"
     )
     args = ap.parse_args()
@@ -2999,10 +3005,19 @@ def main() -> None:
                 window_ms=args.batch_window_ms,
             )
             la_dirs = []
-            arm_fa = search_forge_args(args, state["ckpt"]) if args.arms_lookahead == "on" else []
+            base_fa = ["-targetmask", "legal-plans"] if args.target_mask else []
+            # A target mask is useful to both ordinary and lookahead arms, but
+            # it must not by itself create a duplicate "lookahead" arm when no
+            # search recipe is configured.
+            has_search_recipe = bool((args.search_recipe or "").split())
+            lookahead_fa = (
+                search_forge_args(args, state["ckpt"])
+                if args.arms_lookahead == "on" and has_search_recipe
+                else []
+            )
             try:
                 for seat, la in ((0, False), (1, False), (0, True), (1, True)):
-                    if la and not arm_fa:
+                    if la and not lookahead_fa:
                         continue
                     ap_purpose = f"{args.name}-arm{'la' if la else ''}-i{k:03d}-s{seat}"
                     before = set(glob.glob(str(RUNS_DIR / f"{ap_purpose}-*")))
@@ -3038,10 +3053,8 @@ def main() -> None:
                         arm_cmd += ["--pool-version", args.pool_version]
                     if args.reask:
                         arm_cmd.append("--reask")
-                    if la:
-                        # M12 Build 4½: the with-lookahead arm — the same
-                        # ckpt under the run's search recipe (the network-
-                        # alone vs with-lookahead gap, read mid-run)
+                    arm_fa = lookahead_fa if la else base_fa
+                    if arm_fa:
                         arm_cmd += ["--forge-args", " ".join(arm_fa), "--labels"]
                     if args.jar:
                         arm_cmd += ["--jar", str(args.jar)]

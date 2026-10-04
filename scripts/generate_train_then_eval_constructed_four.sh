@@ -36,6 +36,17 @@ EMBED_MODEL="${EMBED_MODEL:-bge-m3}"
 EMBED="${EMBED:-data/embeddings/${POOL_VERSION}-${EMBED_MODEL}}"
 EMBED_BATCH="${EMBED_BATCH:-32}"
 REBUILD_POOL="${REBUILD_POOL:-0}"
+# Experimental legality mask. Keep off until the flag-off identity and
+# flag-on replay-parity smoke gates have passed; set TARGET_MASK=1 to enable
+# it consistently for corpus generation, BC evaluation, RL, and RL arms.
+TARGET_MASK="${TARGET_MASK:-0}"
+TARGET_FORGE_ARGS=()
+if [[ "$TARGET_MASK" == "1" ]]; then
+    TARGET_FORGE_ARGS=(--forge-args "-targetmask legal-plans")
+elif [[ "$TARGET_MASK" != "0" ]]; then
+    echo "TARGET_MASK must be 0 or 1; got $TARGET_MASK" >&2
+    exit 1
+fi
 
 # These generation values can be overridden without editing the script.
 GEN_GAMES="${GEN_GAMES:-40000}"
@@ -462,7 +473,8 @@ echo "[pipeline] generating $GEN_GAMES heuristic games over four constructed dec
     --census \
     --pool-version "$POOL_VERSION" \
     --purpose "$GEN_PURPOSE" \
-    --seed-base "$GEN_SEED_BASE"
+    --seed-base "$GEN_SEED_BASE" \
+    "${TARGET_FORGE_ARGS[@]}"
 
 generated_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
 if [[ -z "${generated_runs[0]:-}" || -n "${generated_runs[1]:-}" ]]; then
@@ -605,7 +617,8 @@ run_eval() {
         --census \
         --pool-version "$POOL_VERSION" \
         --purpose "$purpose" \
-        --seed-base "$EVAL_SEED_BASE"
+        --seed-base "$EVAL_SEED_BASE" \
+        "${TARGET_FORGE_ARGS[@]}"
 
     local matches=("$ROOT/data/runs/${purpose}-"*)
     if [[ -z "${matches[0]:-}" || -n "${matches[1]:-}" ]]; then
@@ -701,6 +714,9 @@ RL_ARGS=(
 
 if [[ "$RL_NO_INHIBIT" == "1" ]]; then
     RL_ARGS+=(--no-inhibit)
+fi
+if [[ "$TARGET_MASK" == "1" ]]; then
+    RL_ARGS+=(--target-mask)
 fi
 
 "$PYTHON" -m anvil.training.selfplay "${RL_ARGS[@]}"

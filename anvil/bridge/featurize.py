@@ -32,6 +32,7 @@ import numpy as np
 import torch
 
 from anvil.encoder.transform import HISTORY_K, assemble, player_seats
+from anvil.policy.target_plans import target_plan_fields
 from anvil.store.castplan import ret_plans
 from anvil.training.dataset import (
     COLOR_CLASSES,
@@ -453,6 +454,15 @@ class Featurizer:
         cand_ak = [-1] * len(cand_rows)
         for ci, ar in ak_of_cand.items():
             cand_ak[ci] = ar
+        target_ex, target_aux = target_plan_fields(
+            dec.get("opts") or [] if task == "priority" else [],
+            wire_to_candidate,
+            len(cand_rows),
+            row_of,
+            p,
+            len(header["players"]),
+            T_MAX,
+        )
         from anvil.encoder.stack_fields import stack_fields
 
         stack_ex = {k: torch.from_numpy(a) for k, a in stack_fields(out, self.abil, p).items()}
@@ -468,6 +478,7 @@ class Featurizer:
             "cand_sa": torch.tensor(cand_sa, dtype=torch.int64),
             "cand_kind": torch.tensor(cand_kind, dtype=torch.int64),
             "cand_ak": torch.tensor(cand_ak, dtype=torch.int64),
+            **target_ex,
             **stack_ex,
             "cand_paykind": torch.tensor(cand_paykind, dtype=torch.int64),
             "cand_ents": torch.tensor(
@@ -540,6 +551,7 @@ class Featurizer:
             "cmb_members": {r: sorted(ids) for r, ids in cmb_members.items()},
             "blk_atk_rows": blk_atk_rows,
             "seats": player_seats(p, n_players),
+            **target_aux,
             **aux_sched,
             "color_first_opt": color_first_opt,
             "color_options_valid": any(v >= 0 for v in color_first_opt),

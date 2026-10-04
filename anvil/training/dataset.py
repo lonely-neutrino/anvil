@@ -95,6 +95,7 @@ from anvil.encoder.transform import (
     player_target_position,
 )
 from anvil.policy.surfaces import SURF_BUILT, SURF_MAX, AbilityCache, surface_fields, surface_task
+from anvil.policy.target_plans import target_plan_fields
 from anvil.store.castplan import ret_plans
 from anvil.store.trajectories import open_store
 
@@ -540,6 +541,7 @@ class PriorityWindows(IterableDataset):
             cand_sa = [-1]
             cand_kind = [-1]
             ak_of_cand: dict[int, int] = {}  # Build 4: candidate index -> ability-table row
+            wire_to_candidate = [0]
             label = 0
             label_row = -1
             tgt_kind = np.full(T_MAX + 1, -1, dtype=np.int64)
@@ -571,11 +573,14 @@ class PriorityWindows(IterableDataset):
                 for o in opts:
                     r = row_of.get(o.get("e"))
                     if r is None:
+                        wire_to_candidate.append(-1)
                         continue
                     key = (r, norm_sa(o.get("sa", "")))
                     if key in key_of:
+                        wire_to_candidate.append(key_of[key])
                         continue
                     key_of[key] = len(cand_rows)
+                    wire_to_candidate.append(len(cand_rows))
                     if self.abil is not None and o.get("ak"):
                         ak_of_cand[len(cand_rows)] = self.abil.index(o.get("ak"))
                     cand_rows.append(r)
@@ -698,6 +703,15 @@ class PriorityWindows(IterableDataset):
             cand_ak = [-1] * len(cand_rows)
             for ci, ar in ak_of_cand.items():
                 cand_ak[ci] = ar
+            target_ex, _ = target_plan_fields(
+                dec.get("opts") or [] if task == "priority" else [],
+                wire_to_candidate,
+                len(cand_rows),
+                row_of,
+                p,
+                len(traj.header["players"]),
+                T_MAX,
+            )
             stack_ex = {k: torch.from_numpy(a) for k, a in stack_fields(out, self.abil, p).items()}
             yield {
                 "entities": torch.from_numpy(out["entities"]),
@@ -711,6 +725,7 @@ class PriorityWindows(IterableDataset):
                 "cand_sa": torch.tensor(cand_sa, dtype=torch.int64),
                 "cand_kind": torch.tensor(cand_kind, dtype=torch.int64),
                 "cand_ak": torch.tensor(cand_ak, dtype=torch.int64),
+                **target_ex,
                 **stack_ex,
                 "label": torch.tensor(label, dtype=torch.int64),
                 "label_row": torch.tensor(label_row, dtype=torch.int64),
@@ -837,6 +852,45 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
     out["color_label"] = torch.stack(
         [x.get("color_label", torch.tensor(-1, dtype=torch.int64)) for x in batch]
     )
+    if any("tp_enforce" in x for x in batch):
+        # Additive schema-v3 legal target plans. Plans are flattened across
+        # candidates; token classes are remapped here because player/STOP
+        # slots begin after the batch-padded entity width. A wholly legacy
+        # batch omits these keys and takes the exact pre-mask model path.
+        P = max(1, max(x.get("tp_cand", torch.empty(0)).shape[0] for x in batch))
+        S = T_MAX + 1
+        out["tp_cand"] = torch.full((b, P), -1, dtype=torch.int64)
+        out["tp_wire"] = torch.full((b, P), -1, dtype=torch.int64)
+        out["tp_tokens"] = torch.full((b, P, S), -1, dtype=torch.int64)
+        out["tp_xmask"] = torch.zeros((b, P), dtype=torch.int64)
+        out["tp_mask"] = torch.zeros((b, P), dtype=torch.bool)
+        out["tp_enforce"] = torch.zeros((b, c), dtype=torch.bool)
+        out["tp_cand_allow"] = torch.ones((b, c), dtype=torch.bool)
+        out["tp_forced_wire"] = torch.stack(
+            [x.get("tp_forced_wire", torch.tensor(-1, dtype=torch.int64)) for x in batch]
+        )
+        for i, x in enumerate(batch):
+            ci = x["cand_rows"].shape[0]
+            if "tp_enforce" in x:
+                out["tp_enforce"][i, :ci] = x["tp_enforce"]
+                out["tp_cand_allow"][i, :ci] = x["tp_cand_allow"]
+            pi = x.get("tp_cand", torch.empty(0, dtype=torch.int64)).shape[0]
+            if not pi:
+                continue
+            out["tp_cand"][i, :pi] = x["tp_cand"]
+            out["tp_wire"][i, :pi] = x["tp_wire"]
+            out["tp_xmask"][i, :pi] = x["tp_xmask"]
+            out["tp_mask"][i, :pi] = True
+            kinds, idxs = x["tp_kind"], x["tp_idx"]
+            tok = torch.full_like(kinds, -1)
+            tok = torch.where(kinds == 0, idxs, tok)
+            tok = torch.where(kinds == 1, n + idxs, tok)
+            tok = torch.where(
+                kinds == 2,
+                torch.full_like(tok, n + batch[i]["players"].shape[0]),
+                tok,
+            )
+            out["tp_tokens"][i, :pi] = tok
     # target labels -> class ids over the padded batch: [0,n) entity rows,
     # [n, n+p) players, n+p = STOP; -1 stays "no slot" (loss ignore_index)
     p = batch[0]["players"].shape[0]

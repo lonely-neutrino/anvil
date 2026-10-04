@@ -701,6 +701,10 @@ def replay(run_dir: Path, index: int) -> None:
         # match the original run's logging configuration to reproduce it.
         # The replay's own observation output is a throwaway.
         cmd += ["-obs", str(run_dir / f"replay-{index}-obs.zst")]
+    if m.get("forge_args"):
+        # Target masking and search flags affect the behavior policy and must
+        # be replayed exactly as recorded in run.json.
+        cmd += list(m["forge_args"])
     subprocess.run(cmd, cwd=FORGE_GUI_DIR, check=False)
 
 
