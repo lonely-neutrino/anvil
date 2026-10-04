@@ -20,8 +20,8 @@ mkdir -p /projects/<account>/<netid>/mtg-ai
 cd /projects/<account>/<netid>/mtg-ai
 git clone https://github.com/lonely-neutrino/anvil.git
 cd anvil
-git fetch origin feature/legal-target-plan-mask
-git switch --track origin/feature/legal-target-plan-mask
+git fetch origin HPC
+git switch --track origin/HPC
 ```
 
 The Quest helper files must be present in the branch you fetch. If this branch
