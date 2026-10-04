@@ -68,6 +68,7 @@ workstation's ROCm wheel or the lockfile's newer CUDA 13 wheel.
 cd /projects/<account>/<netid>/mtg-ai/anvil
 export QUEST_PYTHON_MODULE=python/<available-version>
 export QUEST_CUDA_MODULE=cuda/<available-12.x-version>
+export QUEST_JAVA_MODULE=java/<available-17+-version>
 export FORGE_DIR=/projects/<account>/<netid>/mtg-ai/forge
 bash scripts/quest/bootstrap_env.sh
 ```
