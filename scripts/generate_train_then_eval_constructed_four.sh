@@ -110,6 +110,7 @@ RL_ARMS_EVERY="${RL_ARMS_EVERY:-10}"
 RL_ARMS_GAMES="${RL_ARMS_GAMES:-4000}"
 RL_ARMS_SEED_BASE="${RL_ARMS_SEED_BASE:-20260710}"
 RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+RL_RESUME="${RL_RESUME:-0}"
 RL_PAIRS="${RL_PAIRS:-data/pool/custom/constructed-four-rl-pairs.txt}"
 ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/constructed-four-arms-pairs-800.txt}"
 
@@ -137,10 +138,18 @@ for deck in "${DECKS[@]}"; do
 done
 
 [[ ! -e "$TRAIN_OUT" ]] || { echo "output already exists: $TRAIN_OUT" >&2; exit 1; }
-[[ ! -e "$ROOT/data/training/$RL_NAME" ]] || {
+if [[ "$RL_RESUME" != "0" && "$RL_RESUME" != "1" ]]; then
+    echo "RL_RESUME must be 0 or 1; got $RL_RESUME" >&2
+    exit 1
+fi
+if [[ "$RL_RESUME" == "1" && -z "$BC_CKPT_INPUT" ]]; then
+    echo "RL_RESUME=1 requires BC_CKPT=<path to the existing BC checkpoint>" >&2
+    exit 1
+fi
+if [[ "$RL_RESUME" != "1" && -e "$ROOT/data/training/$RL_NAME" ]]; then
     echo "RL output already exists: $ROOT/data/training/$RL_NAME" >&2
     exit 1
-}
+fi
 
 # ---------- custom pool and embedding cache ----------
 

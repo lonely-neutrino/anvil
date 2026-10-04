@@ -48,7 +48,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=6.33.6" },
     { name = "safetensors", specifier = ">=0.8.0" },
     { name = "sentence-transformers", specifier = ">=5.6.0" },
-    { name = "torch", specifier = ">=2.12.1" },
+    { name = "torch", specifier = ">=2.9.0" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
 
