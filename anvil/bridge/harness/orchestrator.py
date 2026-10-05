@@ -525,6 +525,7 @@ def launch(a) -> Path:
         shutil.copy(a.pairs_file, run_dir / "pairs.txt")
         n_lines = sum(1 for _ in open(run_dir / "pairs.txt"))
         pool_fields = {
+            **pool_fields,
             "pairs_file": "pairs.txt",
             "pairs_source": str(a.pairs_file),
             "pairs_sha256": _sha256(run_dir / "pairs.txt"),

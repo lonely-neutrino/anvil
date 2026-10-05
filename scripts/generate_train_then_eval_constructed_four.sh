@@ -462,32 +462,77 @@ PY
 validate_resume_run() {
     local run_dir="$1"
     "$PYTHON" - "$run_dir/run.json" "$GEN_GAMES" "$GEN_GAMES_PER_PAIR" \
-        "$FORMAT" "$GEN_SEED_BASE" "$POOL_VERSION" <<'PY'
+        "$FORMAT" "$GEN_SEED_BASE" "$POOL_VERSION" "${DECKS[@]}" <<'PY'
 import json
+import hashlib
 import sys
+from collections import Counter
 from pathlib import Path
 
 manifest_path = Path(sys.argv[1])
 expected_games, expected_gpp = map(int, sys.argv[2:4])
 expected_format, expected_seed, expected_pool = sys.argv[4], int(sys.argv[5]), sys.argv[6]
+decks = sys.argv[7:]
 manifest = json.loads(manifest_path.read_text())
 checks = {
     "games": (manifest.get("games"), expected_games),
     "games_per_pair": (manifest.get("games_per_pair"), expected_gpp),
     "format": (manifest.get("format"), expected_format),
     "seed_base": (manifest.get("seed_base"), expected_seed),
-    "pool_version": (manifest.get("pool_version"), expected_pool),
+    "start_index": (manifest.get("start_index", 0), 0),
 }
 bad = {
     key: got_expected
     for key, got_expected in checks.items()
     if got_expected[0] != got_expected[1]
 }
+actual_pool = manifest.get("pool_version")
+if actual_pool not in (None, expected_pool):
+    bad["pool_version"] = (actual_pool, expected_pool)
 for key in ("obs", "census"):
     if not manifest.get(key):
         bad[key] = (manifest.get(key), True)
+
+expected_pairs = expected_games // expected_gpp
+pairs_rel = manifest.get("pairs_file")
+pairs_path = manifest_path.parent / pairs_rel if pairs_rel else None
+if pairs_path is None or not pairs_path.is_file():
+    bad["pairs_file"] = (pairs_rel, "a readable pinned pairs file")
+else:
+    pair_lines = pairs_path.read_text().splitlines()
+    if manifest.get("n_pairs") != expected_pairs:
+        bad["n_pairs"] = (manifest.get("n_pairs"), expected_pairs)
+    if len(pair_lines) != expected_pairs:
+        bad["pairs_file_lines"] = (len(pair_lines), expected_pairs)
+    actual_sha = hashlib.sha256(pairs_path.read_bytes()).hexdigest()
+    if manifest.get("pairs_sha256") != actual_sha:
+        bad["pairs_sha256"] = (manifest.get("pairs_sha256"), actual_sha)
+    expected_matchups = [(a, b) for a in decks for b in decks]
+    counts = Counter()
+    malformed = []
+    for number, line in enumerate(pair_lines, 1):
+        fields = line.split("\t")
+        if len(fields) != 2:
+            malformed.append((number, line))
+        else:
+            counts[tuple(fields)] += 1
+    values = [counts[pair] for pair in expected_matchups]
+    if (
+        malformed
+        or set(counts) != set(expected_matchups)
+        or len(set(values)) != 1
+    ):
+        bad["pair_schedule"] = {
+            "counts": dict(counts),
+            "malformed": malformed[:3],
+        }
 if bad:
     raise SystemExit(f"resume run does not match the requested BC corpus: {bad}")
+if actual_pool is None:
+    print(
+        "[pipeline] resume compatibility: explicit-pairs manifest has no "
+        "pool_version; pinned pair schedule verified"
+    )
 print(f"[pipeline] resume manifest verified: {manifest_path.parent}")
 PY
 }
