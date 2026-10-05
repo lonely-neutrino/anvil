@@ -56,6 +56,11 @@ def main() -> int:
     if args.require_jar and java is None:
         problems.append("java is not on PATH")
 
+    git = shutil.which("git")
+    _print("git", git or "missing")
+    if args.require_jar and git is None:
+        problems.append("git is not on PATH; load a Quest Git module")
+
     try:
         torch = importlib.import_module("torch")
     except Exception as exc:  # pragma: no cover - exercised by broken envs

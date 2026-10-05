@@ -57,6 +57,7 @@ an example is installed on your account:
 ```bash
 module spider python
 module spider cuda
+module spider git
 ```
 
 Then set the actual module names and bootstrap the environment from the Anvil
@@ -69,6 +70,7 @@ cd /projects/<account>/<netid>/mtg-ai/anvil
 export QUEST_PYTHON_MODULE=python/<available-version>
 export QUEST_CUDA_MODULE=cuda/<available-12.x-version>
 export QUEST_JAVA_MODULE=java/<available-17+-version>
+export QUEST_GIT_MODULE=git/<available-version>
 export FORGE_DIR=/projects/<account>/<netid>/mtg-ai/forge
 bash scripts/quest/bootstrap_env.sh
 ```

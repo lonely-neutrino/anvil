@@ -29,6 +29,9 @@ fi
 if [[ -n "${QUEST_JAVA_MODULE:-}" ]]; then
     module load "$QUEST_JAVA_MODULE"
 fi
+if [[ -n "${QUEST_GIT_MODULE:-}" ]]; then
+    module load "$QUEST_GIT_MODULE"
+fi
 
 PYTHON="${PYTHON:-python3}"
 ENV_DIR="${ENV_DIR:-$ROOT/.venv}"

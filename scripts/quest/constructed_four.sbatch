@@ -38,6 +38,9 @@ fi
 if [[ -n "${QUEST_JAVA_MODULE:-}" ]]; then
     module load "$QUEST_JAVA_MODULE"
 fi
+if [[ -n "${QUEST_GIT_MODULE:-}" ]]; then
+    module load "$QUEST_GIT_MODULE"
+fi
 
 ROOT="${ANVIL_ROOT:-${SLURM_SUBMIT_DIR:?set ANVIL_ROOT or submit from the Anvil checkout}}"
 FORGE_DIR="${FORGE_DIR:?set FORGE_DIR to the built Forge checkout}"
