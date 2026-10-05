@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=anvil-4deck
-#SBATCH --account=REPLACE_WITH_QUEST_ACCOUNT
+#SBATCH --account=p31830
 #SBATCH --partition=gengpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
