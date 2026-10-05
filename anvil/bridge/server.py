@@ -1361,7 +1361,14 @@ def main() -> None:
         "Per-child outputs (--mu-out/--drill-mu-out/--bind-trace/--counts-out) are merged at shutdown.",
     )
     ap.add_argument("--max-batch", type=int, default=16, help="micro-batch cap (the batcher drains up to this)")
-    ap.add_argument("--window-ms", type=float, default=3.0, help="micro-batch gather window")
+    ap.add_argument(
+        "--window-ms",
+        "--batch-window-ms",
+        dest="window_ms",
+        type=float,
+        default=3.0,
+        help="micro-batch gather window",
+    )
     ap.add_argument(
         "--stats-every", type=float, default=60.0,
         help="seconds between `[server] stats` occupancy lines (asks, mean batch, queue wait, busy %%); 0 = off",
