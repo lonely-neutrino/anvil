@@ -94,6 +94,7 @@ case "$QUEST_MODE" in
         export GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-2}"
         export GEN_WORKERS="${GEN_WORKERS:-8}"
         export GEN_CHUNK="${GEN_CHUNK:-8}"
+        export GEN_CALIBRATED="${GEN_CALIBRATED:-1}"
         export BC_STEPS="${BC_STEPS:-2000}"
         export EVAL_GAMES="${EVAL_GAMES:-256}"
         export EVAL_GAMES_PER_PAIR="${EVAL_GAMES_PER_PAIR:-2}"
@@ -114,8 +115,12 @@ case "$QUEST_MODE" in
         # the 40,000-game BC training store.
         export GEN_GAMES="${GEN_GAMES:-40000}"
         export GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-10}"
-        export GEN_WORKERS="${GEN_WORKERS:-8}"
-        export GEN_CHUNK="${GEN_CHUNK:-10}"
+        # Quest has 48 allocated CPU cores. The previous w=8 run left the
+        # node 79-95% idle, so use enough short-lived JVM lanes to expose the
+        # available parallelism while keeping the tail bounded.
+        export GEN_WORKERS="${GEN_WORKERS:-24}"
+        export GEN_CHUNK="${GEN_CHUNK:-20}"
+        export GEN_CALIBRATED="${GEN_CALIBRATED:-1}"
         export GEN_SEED_BASE="${GEN_SEED_BASE:-20260924}"
         export BC_STEPS="${BC_STEPS:-200000}"
         export EVAL_GAMES="${EVAL_GAMES:-4000}"
@@ -137,8 +142,11 @@ case "$QUEST_MODE" in
         export SKIP_BC_EVAL="${SKIP_BC_EVAL:-1}"
         ;;
     full)
-        # Keep the pipeline's measured defaults unless the caller overrides
-        # them. In particular, one job stays on one GPU/node.
+        # One job stays on one GPU/node. Generation defaults are tuned for the
+        # 48-core Quest allocation; callers can override them before sbatch.
+        export GEN_WORKERS="${GEN_WORKERS:-24}"
+        export GEN_CHUNK="${GEN_CHUNK:-20}"
+        export GEN_CALIBRATED="${GEN_CALIBRATED:-1}"
         export RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
         export SKIP_BC_EVAL="${SKIP_BC_EVAL:-0}"
         ;;

@@ -155,6 +155,35 @@ matches the local recipe and hyperparameters, but a freshly generated Quest
 heuristic store/checkpoint will not be bit-for-bit identical unless the Forge
 build and all source artifacts are identical.
 
+The Quest wrapper uses 24 heuristic JVM workers with 20-game chunks and normal
+OS priority for this mode. These defaults are intentionally different from a
+desktop background run: the Quest allocation has 48 CPU cores, and a previous
+8-worker run left most of that allocation idle. You can benchmark alternatives
+without editing the script:
+
+```bash
+export GEN_WORKERS=24
+export GEN_CHUNK=20
+export GEN_CALIBRATED=1
+```
+
+If generation is interrupted before BC starts, resume the existing harness run
+instead of regenerating it. The resume path records its execution overrides in
+`resume-overrides.jsonl` while leaving the original seed and corpus manifest
+unchanged:
+
+```bash
+export GEN_RESUME_RUN=/projects/<account>/<netid>/mtg-ai/anvil/data/runs/constructed-four-heur-40000-quest-<old-jobid>-<timestamp>
+export GEN_RESUME_WORKERS=24
+export GEN_RESUME_CHUNK=20
+export GEN_RESUME_CALIBRATED=1
+export QUEST_MODE=bc-rl
+sbatch scripts/quest/constructed_four.sbatch
+```
+
+The old allocation must no longer be running the harness when this is
+submitted; do not run two schedulers against one run directory.
+
 ## 7. Run production self-play
 
 After the smoke succeeds, submit the same wrapper with `QUEST_MODE=full`.

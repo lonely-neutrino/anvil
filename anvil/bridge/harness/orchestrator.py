@@ -21,6 +21,9 @@ Verbs (python -m anvil.bridge.harness ...):
          [--launch-delay-ms N] [--calibrated]
   resume <run-dir>      status <run-dir>       pause <run-dir>
   replay <run-dir> <index>                     summarize <run-dir>
+
+resume may take execution-only overrides for workers, chunk size, and OS
+priority. These do not alter the run manifest or game seeds.
 """
 
 from __future__ import annotations
@@ -154,10 +157,14 @@ class Run:
             return set(json.loads(self.skips_file.read_text())["indices"])
         return set()
 
-    def remaining_chunks(self) -> list[tuple[int, int]]:
+    def remaining_chunks(self, chunk_override: int | None = None) -> list[tuple[int, int]]:
         """Contiguous (start, count) spans still to play, chunk-aligned."""
         done = set(self.completed()) | self.skipped()
-        chunk = self.manifest["chunk"]
+        chunk = int(
+            self.manifest["chunk"] if chunk_override is None else chunk_override
+        )
+        if chunk <= 0:
+            raise ValueError(f"chunk must be positive, got {chunk}")
         start = self.manifest.get("start_index", 0)
         end = start + self.manifest["games"]
         spans = []
@@ -191,13 +198,16 @@ class Run:
             )
         return jar
 
-    def launch_worker(self, span: tuple[int, int], inv: int) -> subprocess.Popen:
+    def launch_worker(
+        self, span: tuple[int, int], inv: int, nice_override: bool | None = None
+    ) -> subprocess.Popen:
         jar = self._verify_jar()
         m = self.manifest
         wdir = self.workers_dir / f"inv-{inv:04d}"
         wdir.mkdir(parents=True, exist_ok=True)
         cmd = []
-        if m["nice"]:
+        use_nice = m["nice"] if nice_override is None else nice_override
+        if use_nice:
             cmd += ["nice", "-n", "19"]
         # ANVIL_EXTRA_JVM_OPTS: ad-hoc worker JVM flags (e.g.
         # -Danvil.crash.trace=true for crash-class diagnosis) without a
@@ -331,18 +341,38 @@ class Run:
 
     # ---------- scheduler ----------
 
-    def schedule(self) -> None:
-        pending = self.remaining_chunks()
+    def schedule(
+        self,
+        workers: int | None = None,
+        chunk: int | None = None,
+        nice: bool | None = None,
+    ) -> None:
+        pending = self.remaining_chunks(chunk)
         total = self.manifest["games"]
         crash_counts: dict[int, int] = {}
         zero_progress_exits = 0  # systemic-failure guard (vs per-game skip rule)
         inv = max([int(p.name[4:]) for p in self.workers_dir.glob("inv-*")] or [-1]) + 1
         active: list[tuple[subprocess.Popen, tuple[int, int]]] = []
-        slots = self.manifest["workers"]
+        slots = int(workers if workers is not None else self.manifest["workers"])
+        if slots <= 0:
+            raise ValueError(f"workers must be positive, got {slots}")
         launch_delay_s = max(0.0, float(self.manifest.get("launch_delay_ms", 0.0))) / 1000.0
         last_launch = None
         t0 = time.monotonic()
         addrs = bridge_addrs(self.manifest)
+        overrides = {
+            key: value
+            for key, value in (
+                ("workers", workers),
+                ("chunk", chunk),
+                ("nice", nice),
+            )
+            if value is not None
+        }
+        if overrides:
+            with (self.dir / "resume-overrides.jsonl").open("a") as f:
+                f.write(json.dumps({"at": _dt.datetime.now().isoformat(), **overrides}) + "\n")
+            print(f"[harness] resume execution overrides: {overrides}")
         print(
             f"[harness] {len(self.completed())}/{total} done, "
             f"{len(pending)} spans pending, {slots} slots, "
@@ -400,7 +430,7 @@ class Run:
                 if last_launch is not None and launch_delay_s:
                     time.sleep(launch_delay_s)
                 span = pending.pop(0)
-                active.append((self.launch_worker(span, inv), span))
+                active.append((self.launch_worker(span, inv, nice_override=nice), span))
                 last_launch = time.monotonic()
                 print(
                     f"[harness] inv-{inv:04d} <- games [{span[0]},{span[0] + span[1]})"
@@ -626,11 +656,21 @@ def launch(a) -> Path:
     return run_dir
 
 
-def resume(run_dir: Path) -> None:
+def resume(
+    run_dir: Path,
+    *,
+    workers: int | None = None,
+    chunk: int | None = None,
+    calibrated: bool = False,
+) -> None:
     r = Run(run_dir)
     if r.stop_file.exists():
         r.stop_file.unlink()
-    r.schedule()
+    r.schedule(
+        workers=workers,
+        chunk=chunk,
+        nice=False if calibrated else None,
+    )
 
 
 def pause(run_dir: Path) -> None:

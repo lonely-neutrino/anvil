@@ -228,7 +228,27 @@ def main() -> None:
         help="candidate target TSV for labels-only natural/forced rollouts",
     )
 
-    for name in ("resume", "pause", "status", "summarize"):
+    rp = sub.add_parser("resume")
+    rp.add_argument("run_dir", type=Path)
+    rp.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="temporary scheduler override; the immutable run manifest is unchanged",
+    )
+    rp.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="temporary games-per-worker-invocation override",
+    )
+    rp.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="run resumed workers at normal OS priority instead of the manifest priority",
+    )
+
+    for name in ("pause", "status", "summarize"):
         p = sub.add_parser(name)
         p.add_argument("run_dir", type=Path)
 
@@ -242,7 +262,12 @@ def main() -> None:
             a.seed_base = secrets.randbelow(1 << 62)
         orc.launch(a)
     elif a.cmd == "resume":
-        orc.resume(a.run_dir)
+        orc.resume(
+            a.run_dir,
+            workers=a.workers,
+            chunk=a.chunk,
+            calibrated=a.calibrated,
+        )
     elif a.cmd == "pause":
         orc.pause(a.run_dir)
     elif a.cmd == "status":

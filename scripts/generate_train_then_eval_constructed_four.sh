@@ -53,6 +53,11 @@ GEN_GAMES="${GEN_GAMES:-40000}"
 GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-10}"
 GEN_WORKERS="${GEN_WORKERS:-8}"
 GEN_CHUNK="${GEN_CHUNK:-10}"
+GEN_CALIBRATED="${GEN_CALIBRATED:-0}"
+GEN_RESUME_RUN="${GEN_RESUME_RUN:-}"
+GEN_RESUME_WORKERS="${GEN_RESUME_WORKERS:-$GEN_WORKERS}"
+GEN_RESUME_CHUNK="${GEN_RESUME_CHUNK:-$GEN_CHUNK}"
+GEN_RESUME_CALIBRATED="${GEN_RESUME_CALIBRATED:-$GEN_CALIBRATED}"
 GEN_BRIDGE="${GEN_BRIDGE:-local-random}"
 GEN_TAGS="${GEN_TAGS:-none}"
 GEN_SEED_BASE="${GEN_SEED_BASE:-$(date +%Y%m%d)}"
@@ -151,8 +156,30 @@ if [[ "$SKIP_BC_EVAL" != "0" && "$SKIP_BC_EVAL" != "1" ]]; then
     echo "SKIP_BC_EVAL must be 0 or 1; got $SKIP_BC_EVAL" >&2
     exit 1
 fi
+for setting in GEN_CALIBRATED GEN_RESUME_CALIBRATED; do
+    value="${!setting}"
+    if [[ "$value" != "0" && "$value" != "1" ]]; then
+        echo "$setting must be 0 or 1; got $value" >&2
+        exit 1
+    fi
+done
+if [[ "$GEN_RESUME_WORKERS" -le 0 || "$GEN_RESUME_CHUNK" -le 0 ]]; then
+    echo "GEN_RESUME_WORKERS and GEN_RESUME_CHUNK must be positive" >&2
+    exit 1
+fi
+GEN_PRIORITY_ARGS=()
+if [[ "$GEN_CALIBRATED" == "1" ]]; then
+    # In the harness, --calibrated means normal OS priority. It does not
+    # change the Forge policy, seed stream, or trajectory flags.
+    GEN_PRIORITY_ARGS+=(--calibrated)
+fi
 if [[ "$RL_RESUME" != "1" && -e "$ROOT/data/training/$RL_NAME" ]]; then
     echo "RL output already exists: $ROOT/data/training/$RL_NAME" >&2
+    exit 1
+fi
+
+if [[ -n "$BC_CKPT_INPUT" && -n "$GEN_RESUME_RUN" ]]; then
+    echo "BC_CKPT and GEN_RESUME_RUN cannot be used together" >&2
     exit 1
 fi
 
@@ -285,7 +312,7 @@ port_open "$RL_PORT_2" && {
     exit 1
 }
 
-if [[ -z "$BC_CKPT_INPUT" ]]; then
+if [[ -z "$BC_CKPT_INPUT" && -z "$GEN_RESUME_RUN" ]]; then
     # A unique purpose keeps a rerun from silently selecting an older
     # generation directory. If the caller supplied a purpose that already
     # exists, stop and make that choice explicit instead.
@@ -432,6 +459,39 @@ print(
 PY
 }
 
+validate_resume_run() {
+    local run_dir="$1"
+    "$PYTHON" - "$run_dir/run.json" "$GEN_GAMES" "$GEN_GAMES_PER_PAIR" \
+        "$FORMAT" "$GEN_SEED_BASE" "$POOL_VERSION" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+expected_games, expected_gpp = map(int, sys.argv[2:4])
+expected_format, expected_seed, expected_pool = sys.argv[4], int(sys.argv[5]), sys.argv[6]
+manifest = json.loads(manifest_path.read_text())
+checks = {
+    "games": (manifest.get("games"), expected_games),
+    "games_per_pair": (manifest.get("games_per_pair"), expected_gpp),
+    "format": (manifest.get("format"), expected_format),
+    "seed_base": (manifest.get("seed_base"), expected_seed),
+    "pool_version": (manifest.get("pool_version"), expected_pool),
+}
+bad = {
+    key: got_expected
+    for key, got_expected in checks.items()
+    if got_expected[0] != got_expected[1]
+}
+for key in ("obs", "census"):
+    if not manifest.get(key):
+        bad[key] = (manifest.get(key), True)
+if bad:
+    raise SystemExit(f"resume run does not match the requested BC corpus: {bad}")
+print(f"[pipeline] resume manifest verified: {manifest_path.parent}")
+PY
+}
+
 GEN_PAIRS="$(mktemp "${TMPDIR:-/tmp}/constructed-four-gen-pairs.XXXXXX")"
 EVAL_PAIRS="$(mktemp "${TMPDIR:-/tmp}/constructed-four-eval-pairs.XXXXXX")"
 SERVER_PIDS=()
@@ -472,32 +532,53 @@ else
 # ---------- generation ----------
 
 require_balanced_total "GEN_GAMES" "$GEN_GAMES" "$GEN_GAMES_PER_PAIR"
-GEN_N_PAIRS=$((GEN_GAMES / GEN_GAMES_PER_PAIR))
-make_pairs "$GEN_PAIRS" "$GEN_N_PAIRS" "$GEN_SEED_BASE"
+if [[ -n "$GEN_RESUME_RUN" ]]; then
+    [[ -d "$GEN_RESUME_RUN" ]] || {
+        echo "GEN_RESUME_RUN is not a directory: $GEN_RESUME_RUN" >&2
+        exit 1
+    }
+    GEN_RUN="$(cd "$GEN_RESUME_RUN" && pwd)"
+    validate_resume_run "$GEN_RUN"
+    resume_args=(
+        "$GEN_RUN"
+        --workers "$GEN_RESUME_WORKERS"
+        --chunk "$GEN_RESUME_CHUNK"
+    )
+    if [[ "$GEN_RESUME_CALIBRATED" == "1" ]]; then
+        resume_args+=(--calibrated)
+    fi
+    echo "[pipeline] resuming $GEN_RUN with workers=$GEN_RESUME_WORKERS chunk=$GEN_RESUME_CHUNK"
+    "$PYTHON" -m anvil.bridge.harness resume "${resume_args[@]}"
+else
+    GEN_N_PAIRS=$((GEN_GAMES / GEN_GAMES_PER_PAIR))
+    make_pairs "$GEN_PAIRS" "$GEN_N_PAIRS" "$GEN_SEED_BASE"
 
-echo "[pipeline] generating $GEN_GAMES heuristic games over four constructed decks"
-"$PYTHON" -m anvil.bridge.harness launch \
-    --pairs-file "$GEN_PAIRS" \
-    --games-per-pair "$GEN_GAMES_PER_PAIR" \
-    --format "$FORMAT" \
-    --games "$GEN_GAMES" \
-    --workers "$GEN_WORKERS" \
-    --chunk "$GEN_CHUNK" \
-    --bridge "$GEN_BRIDGE" \
-    --tags "$GEN_TAGS" \
-    --obs \
-    --census \
-    --pool-version "$POOL_VERSION" \
-    --purpose "$GEN_PURPOSE" \
-    --seed-base "$GEN_SEED_BASE" \
-    "${TARGET_FORGE_ARGS[@]}"
+    echo "[pipeline] generating $GEN_GAMES heuristic games over four constructed decks"
+    echo "[pipeline] generation workers=$GEN_WORKERS chunk=$GEN_CHUNK calibrated=$GEN_CALIBRATED"
+    "$PYTHON" -m anvil.bridge.harness launch \
+        --pairs-file "$GEN_PAIRS" \
+        --games-per-pair "$GEN_GAMES_PER_PAIR" \
+        --format "$FORMAT" \
+        --games "$GEN_GAMES" \
+        --workers "$GEN_WORKERS" \
+        --chunk "$GEN_CHUNK" \
+        --bridge "$GEN_BRIDGE" \
+        --tags "$GEN_TAGS" \
+        --obs \
+        --census \
+        --pool-version "$POOL_VERSION" \
+        --purpose "$GEN_PURPOSE" \
+        --seed-base "$GEN_SEED_BASE" \
+        "${GEN_PRIORITY_ARGS[@]}" \
+        "${TARGET_FORGE_ARGS[@]}"
 
-generated_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
-if [[ -z "${generated_runs[0]:-}" || -n "${generated_runs[1]:-}" ]]; then
-    echo "expected one generated run for purpose $GEN_PURPOSE" >&2
-    exit 1
+    generated_runs=("$ROOT/data/runs/${GEN_PURPOSE}-"*)
+    if [[ -z "${generated_runs[0]:-}" || -n "${generated_runs[1]:-}" ]]; then
+        echo "expected one generated run for purpose $GEN_PURPOSE" >&2
+        exit 1
+    fi
+    GEN_RUN="${generated_runs[0]}"
 fi
-GEN_RUN="${generated_runs[0]}"
 
 "$PYTHON" - "$GEN_RUN/summary.json" "$GEN_GAMES" <<'PY'
 import json
