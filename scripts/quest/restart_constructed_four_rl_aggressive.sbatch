@@ -18,8 +18,9 @@
 # only the throughput settings are made more aggressive:
 #
 #   rollout workers: 12 -> 24
-#   learner workers:   0 -> 8
-#   learner segment:  64 -> 128
+#   learner workers:   0 -> 12
+#   learner segment:  64 -> 256
+#   worker launch ramp: 2s -> 4s
 #
 # Override any setting with an environment variable before `sbatch`.  The
 # default RL_NAME is new, so this cannot overwrite constructed-four-rl-current.
@@ -64,7 +65,7 @@ ARMS_PAIRS="${ARMS_PAIRS:-$ROOT/data/pool/custom/constructed-four-arms-pairs-800
 # A new output name is required for a fresh restart.  selfplay resumes an
 # existing name from its loop_state, so fail rather than accidentally mixing
 # this experiment with an earlier run.
-RL_NAME="${RL_NAME:-constructed-four-rl-aggressive-w24-lw8-s128}"
+RL_NAME="${RL_NAME:-constructed-four-rl-aggressive-w24-lw12-s256-ramp4}"
 RL_OUT="$ROOT/data/training/$RL_NAME"
 
 # Match constructed-four-rl-current unless noted in the header above.
@@ -76,10 +77,10 @@ RL_CHUNK="${RL_CHUNK:-30}"
 RL_SERVERS="${RL_SERVERS:-2}"
 RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
 RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
-RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-2000}"
+RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-4000}"
 RL_SEED_BASE="${RL_SEED_BASE:-20261002}"
-RL_LEARNER_WORKERS="${RL_LEARNER_WORKERS:-8}"
-RL_SEG="${RL_SEG:-128}"
+RL_LEARNER_WORKERS="${RL_LEARNER_WORKERS:-12}"
+RL_SEG="${RL_SEG:-256}"
 RL_HEUR_FRAC="${RL_HEUR_FRAC:-1.0}"
 RL_REPLAY="${RL_REPLAY:-4}"
 RL_FRESH_WEIGHT="${RL_FRESH_WEIGHT:-1.0}"
@@ -186,7 +187,7 @@ fi
 echo "[quest] starting fresh RL run: $RL_NAME"
 echo "[quest] BC checkpoint: $BC_CKPT"
 echo "[quest] RL schedule: $RL_PAIRS"
-echo "[quest] rollout workers=$RL_WORKERS learner-workers=$RL_LEARNER_WORKERS rl-seg=$RL_SEG"
+echo "[quest] rollout workers=$RL_WORKERS learner-workers=$RL_LEARNER_WORKERS rl-seg=$RL_SEG launch-delay-ms=$RL_LAUNCH_DELAY_MS"
 echo "[quest] games/iteration=$RL_GAMES iterations=$RL_ITERATIONS servers=$RL_SERVERS port=$RL_PORT"
 
 RL_ARGS=(
