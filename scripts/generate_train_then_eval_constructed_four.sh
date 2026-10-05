@@ -620,7 +620,7 @@ run_eval() {
         --chunk 10 \
         --launch-delay-ms "$EVAL_LAUNCH_DELAY_MS" \
         --calibrated \
-        --bridges "grpc:localhost:$EVAL_PORT" "grpc:localhost:$EVAL_PORT_2" \
+        --bridge "grpc:localhost:$EVAL_PORT,grpc:localhost:$EVAL_PORT_2" \
         --bridge-seats "$seat" \
         --obs \
         --census \
