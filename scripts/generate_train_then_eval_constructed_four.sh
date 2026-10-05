@@ -63,6 +63,7 @@ TRAIN_OUT="${TRAIN_OUT:-data/training/constructed-four-auto-${RUN_STAMP}}"
 EVAL_PREFIX="${EVAL_PREFIX:-constructed-four-auto-${RUN_STAMP}}"
 BC_STEPS="${BC_STEPS:-200000}"
 BC_CKPT_INPUT="${BC_CKPT:-}"
+SKIP_BC_EVAL="${SKIP_BC_EVAL:-0}"
 # 4000 games / 16 ordered matchups = 250 games per matchup. Ten games per
 # scheduled pair makes that division exact.
 EVAL_GAMES="${EVAL_GAMES:-4000}"
@@ -144,6 +145,10 @@ if [[ "$RL_RESUME" != "0" && "$RL_RESUME" != "1" ]]; then
 fi
 if [[ "$RL_RESUME" == "1" && -z "$BC_CKPT_INPUT" ]]; then
     echo "RL_RESUME=1 requires BC_CKPT=<path to the existing BC checkpoint>" >&2
+    exit 1
+fi
+if [[ "$SKIP_BC_EVAL" != "0" && "$SKIP_BC_EVAL" != "1" ]]; then
+    echo "SKIP_BC_EVAL must be 0 or 1; got $SKIP_BC_EVAL" >&2
     exit 1
 fi
 if [[ "$RL_RESUME" != "1" && -e "$ROOT/data/training/$RL_NAME" ]]; then
@@ -244,27 +249,29 @@ port_open() {
         >/dev/null 2>&1
 }
 
-[[ "$EVAL_PORT" != "$EVAL_PORT_2" ]] || {
-    echo "EVAL_PORT and EVAL_PORT_2 must be different" >&2
-    exit 1
-}
+if [[ "$SKIP_BC_EVAL" != "1" ]]; then
+    [[ "$EVAL_PORT" != "$EVAL_PORT_2" ]] || {
+        echo "EVAL_PORT and EVAL_PORT_2 must be different" >&2
+        exit 1
+    }
 
-port_open "$EVAL_PORT" && {
-    echo "port $EVAL_PORT is already in use; choose another EVAL_PORT" >&2
-    exit 1
-}
-port_open "$EVAL_PORT_2" && {
-    echo "port $EVAL_PORT_2 is already in use; choose another EVAL_PORT_2" >&2
-    exit 1
-}
-[[ "$EVAL_PORT" != "$RL_PORT" && "$EVAL_PORT" != "$RL_PORT_2" ]] || {
-    echo "evaluation and RL ports must be different" >&2
-    exit 1
-}
-[[ "$EVAL_PORT_2" != "$RL_PORT" && "$EVAL_PORT_2" != "$RL_PORT_2" ]] || {
-    echo "evaluation and RL ports must be different" >&2
-    exit 1
-}
+    port_open "$EVAL_PORT" && {
+        echo "port $EVAL_PORT is already in use; choose another EVAL_PORT" >&2
+        exit 1
+    }
+    port_open "$EVAL_PORT_2" && {
+        echo "port $EVAL_PORT_2 is already in use; choose another EVAL_PORT_2" >&2
+        exit 1
+    }
+    [[ "$EVAL_PORT" != "$RL_PORT" && "$EVAL_PORT" != "$RL_PORT_2" ]] || {
+        echo "evaluation and RL ports must be different" >&2
+        exit 1
+    }
+    [[ "$EVAL_PORT_2" != "$RL_PORT" && "$EVAL_PORT_2" != "$RL_PORT_2" ]] || {
+        echo "evaluation and RL ports must be different" >&2
+        exit 1
+    }
+fi
 [[ "$RL_PORT" != "$RL_PORT_2" ]] || {
     echo "RL_PORT and RL_PORT_2 must be different" >&2
     exit 1
@@ -551,6 +558,9 @@ CKPT="$TRAIN_OUT/last.pt"
 
 # ---------- model-vs-heuristic evaluation ----------
 
+if [[ "$SKIP_BC_EVAL" == "1" ]]; then
+    echo "[pipeline] skipping BC-vs-heuristic evaluation (SKIP_BC_EVAL=1)"
+else
 require_balanced_total "EVAL_GAMES" "$EVAL_GAMES" "$EVAL_GAMES_PER_PAIR"
 EVAL_N_PAIRS=$((EVAL_GAMES / EVAL_GAMES_PER_PAIR))
 make_pairs "$EVAL_PAIRS" "$EVAL_N_PAIRS" "$EVAL_SEED_BASE"
@@ -648,6 +658,7 @@ BC_REPORT="$TRAIN_OUT/arms-report.json"
 
 cleanup
 trap - EXIT INT TERM
+fi
 
 fi
 
@@ -743,6 +754,8 @@ echo "[pipeline] checkpoint: $CKPT"
 if [[ -n "$BC_REPORT" ]]; then
     echo "[pipeline] BC report: $BC_REPORT"
     echo "[pipeline] server logs: $SERVER_LOG and $SERVER_LOG_2"
+elif [[ "$SKIP_BC_EVAL" == "1" ]]; then
+    echo "[pipeline] BC report: skipped (SKIP_BC_EVAL=1)"
 else
     echo "[pipeline] BC report: skipped (BC_CKPT supplied)"
 fi

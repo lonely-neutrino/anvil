@@ -65,43 +65,85 @@ done
     --require-jar \
     --require-gpu
 
-# Give every job its own run names and schedule paths. A resumed RL job must
-# explicitly re-export the old RL_NAME, RL_PAIRS, and BC_CKPT values.
+# Give every job its own run names and schedule paths. The bc-rl mode uses the
+# stable names from the current local four-deck recipe so its checkpoints can
+# be inspected with the same paths on Quest. A resumed RL job must explicitly
+# re-export the old RL_NAME, RL_PAIRS, and BC_CKPT values.
 export ANVIL_ROOT="$ROOT"
 export FORGE_DIR
 export DECK_DIR
-export GEN_PURPOSE="${GEN_PURPOSE:-$RUN_TAG-generation}"
-export TRAIN_OUT="${TRAIN_OUT:-data/training/$RUN_TAG-bc}"
-export EVAL_PREFIX="${EVAL_PREFIX:-$RUN_TAG-eval}"
-export RL_NAME="${RL_NAME:-$RUN_TAG-rl}"
-export RL_PAIRS="${RL_PAIRS:-data/pool/custom/$RUN_TAG-rl-pairs.txt}"
-export ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/$RUN_TAG-arms-pairs.txt}"
+if [[ "$QUEST_MODE" == "bc-rl" ]]; then
+    export GEN_PURPOSE="${GEN_PURPOSE:-constructed-four-heur-40000-quest-${SLURM_JOB_ID:-manual}}"
+    export TRAIN_OUT="${TRAIN_OUT:-data/training/constructed-four-bc-current}"
+    export EVAL_PREFIX="${EVAL_PREFIX:-constructed-four-bc-current-eval}"
+    export RL_NAME="${RL_NAME:-constructed-four-rl-current}"
+    export RL_PAIRS="${RL_PAIRS:-data/pool/custom/constructed-four-rl-pairs-20480-current.txt}"
+    export ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/constructed-four-arms-pairs-800.txt}"
+else
+    export GEN_PURPOSE="${GEN_PURPOSE:-$RUN_TAG-generation}"
+    export TRAIN_OUT="${TRAIN_OUT:-data/training/$RUN_TAG-bc}"
+    export EVAL_PREFIX="${EVAL_PREFIX:-$RUN_TAG-eval}"
+    export RL_NAME="${RL_NAME:-$RUN_TAG-rl}"
+    export RL_PAIRS="${RL_PAIRS:-data/pool/custom/$RUN_TAG-rl-pairs.txt}"
+    export ARMS_PAIRS="${ARMS_PAIRS:-data/pool/custom/$RUN_TAG-arms-pairs.txt}"
+fi
 
 case "$QUEST_MODE" in
     smoke)
         export GEN_GAMES="${GEN_GAMES:-256}"
         export GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-2}"
-        export GEN_WORKERS="${GEN_WORKERS:-4}"
-        export GEN_CHUNK="${GEN_CHUNK:-4}"
+        export GEN_WORKERS="${GEN_WORKERS:-8}"
+        export GEN_CHUNK="${GEN_CHUNK:-8}"
         export BC_STEPS="${BC_STEPS:-2000}"
         export EVAL_GAMES="${EVAL_GAMES:-256}"
         export EVAL_GAMES_PER_PAIR="${EVAL_GAMES_PER_PAIR:-2}"
-        export EVAL_WORKERS="${EVAL_WORKERS:-4}"
+        export EVAL_WORKERS="${EVAL_WORKERS:-12}"
         export RL_ITERATIONS="${RL_ITERATIONS:-1}"
         export RL_GAMES="${RL_GAMES:-256}"
         export RL_GAMES_PER_PAIR="${RL_GAMES_PER_PAIR:-2}"
-        export RL_WORKERS="${RL_WORKERS:-4}"
+        export RL_WORKERS="${RL_WORKERS:-12}"
         export RL_CHUNK="${RL_CHUNK:-4}"
         export RL_ARMS_EVERY="${RL_ARMS_EVERY:-0}"
         export RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+        export SKIP_BC_EVAL="${SKIP_BC_EVAL:-0}"
+        ;;
+    bc-rl)
+        # Match the local constructed-four-bc-current ->
+        # constructed-four-rl-current recipe, but omit the intermediate
+        # BC-vs-heuristic evaluation. Generation is still required to create
+        # the 40,000-game BC training store.
+        export GEN_GAMES="${GEN_GAMES:-40000}"
+        export GEN_GAMES_PER_PAIR="${GEN_GAMES_PER_PAIR:-10}"
+        export GEN_WORKERS="${GEN_WORKERS:-8}"
+        export GEN_CHUNK="${GEN_CHUNK:-10}"
+        export GEN_SEED_BASE="${GEN_SEED_BASE:-20260924}"
+        export BC_STEPS="${BC_STEPS:-200000}"
+        export EVAL_GAMES="${EVAL_GAMES:-4000}"
+        export EVAL_GAMES_PER_PAIR="${EVAL_GAMES_PER_PAIR:-10}"
+        export EVAL_WORKERS="${EVAL_WORKERS:-12}"
+        export RL_ITERATIONS="${RL_ITERATIONS:-20}"
+        export RL_GAMES="${RL_GAMES:-2048}"
+        export RL_GAMES_PER_PAIR="${RL_GAMES_PER_PAIR:-2}"
+        export RL_WORKERS="${RL_WORKERS:-12}"
+        export RL_CHUNK="${RL_CHUNK:-30}"
+        export RL_SEED_BASE="${RL_SEED_BASE:-20261002}"
+        export RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
+        export RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
+        export RL_HEUR_FRAC="${RL_HEUR_FRAC:-1.0}"
+        export RL_ARMS_EVERY="${RL_ARMS_EVERY:-5}"
+        export RL_ARMS_GAMES="${RL_ARMS_GAMES:-4000}"
+        export RL_LEARNER_WORKERS="${RL_LEARNER_WORKERS:-0}"
+        export RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+        export SKIP_BC_EVAL="${SKIP_BC_EVAL:-1}"
         ;;
     full)
         # Keep the pipeline's measured defaults unless the caller overrides
         # them. In particular, one job stays on one GPU/node.
         export RL_NO_INHIBIT="${RL_NO_INHIBIT:-1}"
+        export SKIP_BC_EVAL="${SKIP_BC_EVAL:-0}"
         ;;
     *)
-        echo "QUEST_MODE must be smoke or full; got $QUEST_MODE" >&2
+        echo "QUEST_MODE must be smoke, bc-rl, or full; got $QUEST_MODE" >&2
         exit 1
         ;;
 esac

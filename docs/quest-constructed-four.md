@@ -125,7 +125,37 @@ tail -f anvil-4deck-<jobid>.out
 The job's output and data remain under the Anvil checkout. Keep the generated
 checkpoint and run directories; they are useful inputs for the production run.
 
-## 6. Run production self-play
+## 6. Reproduce the current BC-to-RL recipe
+
+Use `QUEST_MODE=bc-rl` to run the current local-style recipe without the
+intermediate BC-vs-heuristic evaluation. It generates the 40,000-game
+heuristic store, trains a 200,000-step BC checkpoint at
+`data/training/constructed-four-bc-current`, then runs 20 RL iterations into
+`data/training/constructed-four-rl-current`. The mode uses the same 2,048 games
+per RL iteration, 12 rollout workers, 16-sample server batches, and 12 ms
+batching window as the local `constructed-four-rl-current` configuration. If
+the named output directories already exist, the job stops rather than
+overwriting them.
+
+```bash
+cd /projects/<account>/<netid>/mtg-ai/anvil
+export ANVIL_ROOT=$PWD
+export FORGE_DIR=/projects/<account>/<netid>/mtg-ai/forge
+export DECK_DIR=$HOME/.forge/decks/constructed
+export QUEST_MODE=bc-rl
+
+JOB_ID=$(sbatch --parsable scripts/quest/constructed_four.sbatch)
+echo "$JOB_ID"
+```
+
+The generated RL schedule is
+`data/pool/custom/constructed-four-rl-pairs-20480-current.txt`; if it does not
+exist, the wrapper creates the deterministic 20,480-line schedule. This mode
+matches the local recipe and hyperparameters, but a freshly generated Quest
+heuristic store/checkpoint will not be bit-for-bit identical unless the Forge
+build and all source artifacts are identical.
+
+## 7. Run production self-play
 
 After the smoke succeeds, submit the same wrapper with `QUEST_MODE=full`.
 Quest's GPU partition has a 48-hour wall-time ceiling. The measured local
