@@ -18,7 +18,8 @@ Verbs (python -m anvil.bridge.harness ...):
   launch (--decks D1 D2 | --pool [--games-per-pair 5]) --games N
          [--workers 16] [--colocated] [--bridge MODE]
          [--tags CSV] [--purpose TXT] [--seed-base X] [--chunk 200]
-         [--launch-delay-ms N] [--calibrated]
+         [--launch-delay-ms N] [--replacement-launch-delay-ms N]
+         [--calibrated]
   resume <run-dir>      status <run-dir>       pause <run-dir>
   replay <run-dir> <index>                     summarize <run-dir>
 
@@ -62,6 +63,23 @@ def default_chunk(games: int, workers: int) -> int:
     — the tail is then one game, not one chunk (every bench cell waited ~20
     min on its last chunk at one round); a JVM start per chunk is ~20 s."""
     return max(1, -(-int(games) // (4 * max(int(workers), 1))))
+
+
+def launch_delay_seconds(manifest: dict, launched: int, slots: int) -> float:
+    """Return the delay before the next worker launch.
+
+    ``launch_delay_ms`` is the legacy/all-launch setting. New manifests may
+    provide a shorter ``replacement_launch_delay_ms``; it takes effect after
+    the initial fleet has filled the available slots. Falling back to the
+    legacy value keeps old manifests' behavior unchanged.
+    """
+    if launched < slots:
+        raw = manifest.get("launch_delay_ms", 0.0)
+    else:
+        raw = manifest.get(
+            "replacement_launch_delay_ms", manifest.get("launch_delay_ms", 0.0)
+        )
+    return max(0.0, float(raw)) / 1000.0
 
 
 def bridge_addrs(m: dict) -> list[str]:
@@ -356,8 +374,8 @@ class Run:
         slots = int(workers if workers is not None else self.manifest["workers"])
         if slots <= 0:
             raise ValueError(f"workers must be positive, got {slots}")
-        launch_delay_s = max(0.0, float(self.manifest.get("launch_delay_ms", 0.0))) / 1000.0
         last_launch = None
+        initial_launches = 0
         t0 = time.monotonic()
         addrs = bridge_addrs(self.manifest)
         overrides = {
@@ -427,11 +445,14 @@ class Run:
             while (
                 pending and len(active) < slots and not self.stop_file.exists() and not yielding
             ):
-                if last_launch is not None and launch_delay_s:
-                    time.sleep(launch_delay_s)
+                if last_launch is not None:
+                    delay_s = launch_delay_seconds(self.manifest, initial_launches, slots)
+                    if delay_s:
+                        time.sleep(delay_s)
                 span = pending.pop(0)
                 active.append((self.launch_worker(span, inv, nice_override=nice), span))
                 last_launch = time.monotonic()
+                initial_launches += 1
                 print(
                     f"[harness] inv-{inv:04d} <- games [{span[0]},{span[0] + span[1]})"
                     + (f" @ {bridge_for(self.manifest, inv)}" if len(addrs) > 1 else "")
@@ -603,7 +624,15 @@ def launch(a) -> Path:
         "seed_base": a.seed_base,
         "games": a.games,
         "chunk": a.chunk or default_chunk(a.games, 12 if a.colocated else a.workers),
+        # ``launch_delay_ms`` remains the legacy/all-launch setting and the
+        # initial-fleet ramp. A replacement delay is optional so old callers
+        # and manifests retain their all-launch behavior.
         "launch_delay_ms": max(0.0, a.launch_delay_ms),
+        "replacement_launch_delay_ms": (
+            max(0.0, getattr(a, "replacement_launch_delay_ms"))
+            if getattr(a, "replacement_launch_delay_ms", None) is not None
+            else max(0.0, a.launch_delay_ms)
+        ),
         "start_index": a.start_index,
         "workers": 12 if a.colocated else a.workers,
         # ExitOnOutOfMemoryError: a batch worker must die (chunk re-issue

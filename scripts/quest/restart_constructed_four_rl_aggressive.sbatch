@@ -20,7 +20,8 @@
 #   rollout workers: 12 -> 24
 #   learner workers:   0 -> 12
 #   learner segment:  64 -> 256
-#   worker launch ramp: 2s -> 4s
+#   initial worker launch ramp: 2s -> 4s
+#   replacement worker launch ramp: 0s -> 0.5s
 #
 # Override any setting with an environment variable before `sbatch`.  The
 # default RL_NAME is new, so this cannot overwrite constructed-four-rl-current.
@@ -78,6 +79,7 @@ RL_SERVERS="${RL_SERVERS:-2}"
 RL_MAX_BATCH="${RL_MAX_BATCH:-16}"
 RL_BATCH_WINDOW_MS="${RL_BATCH_WINDOW_MS:-12}"
 RL_LAUNCH_DELAY_MS="${RL_LAUNCH_DELAY_MS:-4000}"
+RL_REPLACEMENT_LAUNCH_DELAY_MS="${RL_REPLACEMENT_LAUNCH_DELAY_MS:-500}"
 RL_SEED_BASE="${RL_SEED_BASE:-20261002}"
 RL_LEARNER_WORKERS="${RL_LEARNER_WORKERS:-12}"
 RL_SEG="${RL_SEG:-256}"
@@ -187,7 +189,7 @@ fi
 echo "[quest] starting fresh RL run: $RL_NAME"
 echo "[quest] BC checkpoint: $BC_CKPT"
 echo "[quest] RL schedule: $RL_PAIRS"
-echo "[quest] rollout workers=$RL_WORKERS learner-workers=$RL_LEARNER_WORKERS rl-seg=$RL_SEG launch-delay-ms=$RL_LAUNCH_DELAY_MS"
+echo "[quest] rollout workers=$RL_WORKERS learner-workers=$RL_LEARNER_WORKERS initial-launch-delay-ms=$RL_LAUNCH_DELAY_MS replacement-launch-delay-ms=$RL_REPLACEMENT_LAUNCH_DELAY_MS"
 echo "[quest] games/iteration=$RL_GAMES iterations=$RL_ITERATIONS servers=$RL_SERVERS port=$RL_PORT"
 
 RL_ARGS=(
@@ -207,6 +209,7 @@ RL_ARGS=(
     --max-batch "$RL_MAX_BATCH"
     --batch-window-ms "$RL_BATCH_WINDOW_MS"
     --launch-delay-ms "$RL_LAUNCH_DELAY_MS"
+    --replacement-launch-delay-ms "$RL_REPLACEMENT_LAUNCH_DELAY_MS"
     --seed-base "$RL_SEED_BASE"
     --temperature 1.0
     --replay "$RL_REPLAY"

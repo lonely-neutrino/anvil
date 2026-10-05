@@ -583,6 +583,15 @@ def _generation_harness_args(args) -> list[str]:
     ]
 
 
+def _launch_delay_args(args) -> list[str]:
+    """Forward the initial and replacement worker-launch ramps to the harness."""
+    out = ["--launch-delay-ms", str(args.launch_delay_ms)]
+    replacement = getattr(args, "replacement_launch_delay_ms", None)
+    if replacement is not None:
+        out += ["--replacement-launch-delay-ms", str(replacement)]
+    return out
+
+
 def _launch_games(
     purpose: str, games: int, start_index: int, a, bridge_seats: "int | None" = None,
     forge_args: "list[str] | None" = None,
@@ -604,8 +613,7 @@ def _launch_games(
         str(a.workers),
         "--chunk",
         str(batch_chunk(games, a.workers, a.chunk)),
-        "--launch-delay-ms",
-        str(a.launch_delay_ms),
+        *_launch_delay_args(a),
         "--bridge",
         fleet_bridge(a),
         "--obs",
@@ -1481,7 +1489,14 @@ def main() -> None:
         "--launch-delay-ms",
         type=float,
         default=0.0,
-        help="delay between worker JVM launches during generation",
+        help="delay between initial worker JVM launches during generation",
+    )
+    ap.add_argument(
+        "--replacement-launch-delay-ms",
+        type=float,
+        default=None,
+        help="delay between replacement worker JVM launches after the initial fleet; "
+        "defaults to --launch-delay-ms for legacy all-launch behavior",
     )
     ap.add_argument("--max-batch", type=int, default=16)
     ap.add_argument("--batch-window-ms", type=float, default=3.0)
@@ -3036,8 +3051,7 @@ def main() -> None:
                         str(args.workers),
                         "--chunk",
                         str(batch_chunk(args.arms_games, args.workers, args.chunk)),
-                        "--launch-delay-ms",
-                        str(args.launch_delay_ms),
+                        *_launch_delay_args(args),
                         "--bridge",
                         fleet_bridge(args),
                         "--census",

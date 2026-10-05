@@ -86,7 +86,14 @@ def main() -> None:
         "--launch-delay-ms",
         type=float,
         default=0.0,
-        help="delay between launching worker JVMs (execution-only startup ramp)",
+        help="delay between initial worker JVM launches (legacy callers also use it for replacements)",
+    )
+    la.add_argument(
+        "--replacement-launch-delay-ms",
+        type=float,
+        default=None,
+        help="delay between replacement worker JVM launches after the initial fleet; "
+        "defaults to --launch-delay-ms for legacy all-launch behavior",
     )
     la.add_argument("--calibrated", action="store_true")
     la.add_argument(
