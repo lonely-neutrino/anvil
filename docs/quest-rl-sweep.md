@@ -115,6 +115,11 @@ CPU threads each, so 24 workers already consume the 48-CPU allocation.  A
 candidate above 24 may improve throughput only if its extra concurrency helps
 more than the resulting oversubscription costs.
 
+The aggressive table uses two iterations to limit fairshare usage.  When the
+summary is run with `--skip-first`, this leaves one steady-state measurement
+per run, so treat close results as provisional and validate the winner with
+three or four iterations.
+
 ```bash
 cd /gpfs/projects/p31830/mtg-ai/anvil
 export ANVIL_ROOT=$PWD

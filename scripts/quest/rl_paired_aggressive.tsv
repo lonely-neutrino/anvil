@@ -1,6 +1,8 @@
 # id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
-baseline-w24-c15-r0	baseline	4000	24	15	0	8	256	1	2	16	12	3	2048	0
-aggr-w24-c12-r0	generation	4000	24	12	0	8	256	1	2	16	12	3	2048	0
-aggr-w28-c15-r0	generation	4000	28	15	0	8	256	1	2	16	12	3	2048	0
-aggr-w32-c15-r0	generation	4000	32	15	0	8	256	1	2	16	12	3	2048	0
-aggr-w36-c14-r0	generation	4000	36	14	0	8	256	1	2	16	12	3	2048	0
+# This short screen uses two iterations. With --skip-first, each run has one
+# steady-state measurement; validate the selected setting for 3-4 iterations.
+baseline-w24-c15-r0	baseline	4000	24	15	0	8	256	1	2	16	12	2	2048	0
+aggr-w24-c12-r0	generation	4000	24	12	0	8	256	1	2	16	12	2	2048	0
+aggr-w28-c15-r0	generation	4000	28	15	0	8	256	1	2	16	12	2	2048	0
+aggr-w32-c15-r0	generation	4000	32	15	0	8	256	1	2	16	12	2	2048	0
+aggr-w36-c14-r0	generation	4000	36	14	0	8	256	1	2	16	12	2	2048	0
