@@ -1,0 +1,10 @@
+# id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
+# This screen holds generation at the baseline and varies only the learner.
+# It still runs two end-to-end iterations so the timing is easy to collect;
+# use replay=4 in a later validation table for the production workload.
+train-lw4-s128	training	4000	24	21	500	4	128	1	2	16	12	2	2048	0
+train-lw8-s128	training	4000	24	21	500	8	128	1	2	16	12	2	2048	0
+train-lw12-s128	training	4000	24	21	500	12	128	1	2	16	12	2	2048	0
+train-lw12-s256	training	4000	24	21	500	12	256	1	2	16	12	2	2048	0
+train-lw12-s512	training	4000	24	21	500	12	512	1	2	16	12	2	2048	0
+train-lw16-s256	training	4000	24	21	500	16	256	1	2	16	12	2	2048	0
