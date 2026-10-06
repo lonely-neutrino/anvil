@@ -1,0 +1,9 @@
+# id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
+# Update workers/chunk in this table to the winner of the aggressive generation screen before submitting it.
+baseline-w24-c15-r0	baseline	4000	24	15	0	8	256	1	2	16	12	3	2048	0
+delay-r100	serving	4000	24	15	100	8	256	1	2	16	12	3	2048	0
+delay-r250	serving	4000	24	15	250	8	256	1	2	16	12	3	2048	0
+servers-1	serving	4000	24	15	0	8	256	1	1	16	12	3	2048	0
+servers-3	serving	4000	24	15	0	8	256	1	3	16	12	3	2048	0
+batch-24	serving	4000	24	15	0	8	256	1	2	24	12	3	2048	0
+window-6	serving	4000	24	15	0	8	256	1	2	16	6	3	2048	0

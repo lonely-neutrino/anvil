@@ -1,0 +1,8 @@
+# pair_id	config_a	config_b	order
+baseline-repeat	baseline-w24-c15-r0	baseline-w24-c15-r0	a-first
+delay-r100-vs-baseline	baseline-w24-c15-r0	delay-r100	b-first
+delay-r250-vs-baseline	baseline-w24-c15-r0	delay-r250	a-first
+servers-1-vs-baseline	baseline-w24-c15-r0	servers-1	b-first
+servers-3-vs-baseline	baseline-w24-c15-r0	servers-3	a-first
+batch-24-vs-baseline	baseline-w24-c15-r0	batch-24	b-first
+window-6-vs-baseline	baseline-w24-c15-r0	window-6	a-first
