@@ -53,6 +53,10 @@ def _slurm_environment() -> dict[str, str]:
         "SLURM_MEM_PER_NODE",
         "SLURM_GPUS",
         "SLURM_GPUS_ON_NODE",
+        "SLURM_JOB_GPUS",
+        "SLURM_STEP_GPUS",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
         "SLURM_JOB_PARTITION",
         "SLURM_JOB_ACCOUNT",
     )

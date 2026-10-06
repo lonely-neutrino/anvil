@@ -160,6 +160,7 @@ def _start_server(
     ckpt_seat1: str | None = None,
     max_batch: int = 16,
     window_ms: float = 3.0,
+    stats_every: float = 60.0,
 ):
     cmd = [
         sys.executable,
@@ -177,6 +178,8 @@ def _start_server(
         str(max_batch),
         "--window-ms",
         str(window_ms),
+        "--stats-every",
+        str(stats_every),
     ]
     # the fleet week (09-14): N servers on consecutive ports behind one
     # supervisor (anvil.bridge.fleet); the launch's --bridge carries the list
@@ -1500,6 +1503,12 @@ def main() -> None:
     )
     ap.add_argument("--max-batch", type=int, default=16)
     ap.add_argument("--batch-window-ms", type=float, default=3.0)
+    ap.add_argument(
+        "--server-stats-every",
+        type=float,
+        default=60.0,
+        help="seconds between model-server occupancy telemetry lines; 0 disables",
+    )
     ap.add_argument("--port", type=int, default=50063)
     ap.add_argument(
         "--servers",
@@ -2311,6 +2320,7 @@ def main() -> None:
                     servers=fleet_size(args),
                     max_batch=args.max_batch,
                     window_ms=args.batch_window_ms,
+                    stats_every=getattr(args, "server_stats_every", 60.0),
                 )
                 try:
                     fa = search_forge_args(args, state["ckpt"])
@@ -3018,6 +3028,7 @@ def main() -> None:
                 servers=fleet_size(args),
                 max_batch=args.max_batch,
                 window_ms=args.batch_window_ms,
+                stats_every=getattr(args, "server_stats_every", 60.0),
             )
             la_dirs = []
             base_fa = ["-targetmask", "legal-plans"] if args.target_mask else []

@@ -4,18 +4,18 @@
 #SBATCH --partition=gengpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=50
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --time=03:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --array=0-12%4
 #SBATCH --output=anvil-rl-sweep-%A_%a.out
 #SBATCH --error=anvil-rl-sweep-%A_%a.err
 
-# Run one short, isolated RL throughput configuration per Slurm array task.
-# The configuration files are deliberately data-only: edit or replace one of
-# them, then submit the same launcher with a matching --array range.
+# Run one RL throughput configuration per Slurm array task. The bottleneck
+# submitter overrides --cpus-per-task and --array on the sbatch command line,
+# because Slurm cannot vary either value between elements of one array.
 
 set -euo pipefail
 
@@ -79,17 +79,126 @@ export RL_BATCH_WINDOW_MS="$BATCH_WINDOW"
 export RL_ITERATIONS="$ITERATIONS"
 export RL_GAMES="$GAMES"
 export RL_ARMS_EVERY="$ARMS_EVERY"
+export RL_SERVER_STATS_EVERY="${SWEEP_SERVER_STATS_EVERY:-15}"
+
+expected_cpus=$((2 * WORKERS + 2))
+allocated_cpus="${SLURM_CPUS_PER_TASK:-0}"
+if [[ "$allocated_cpus" =~ ^[0-9]+$ ]] && (( allocated_cpus < expected_cpus )); then
+    echo "allocation has $allocated_cpus CPUs but $CONFIG_ID requires at least $expected_cpus" >&2
+    exit 1
+fi
 
 cd "$ROOT"
-mkdir -p "$ROOT/data/training/sweeps/$SWEEP_PREFIX"
-printf '%s\n' "$CONFIG_LINE" > "$ROOT/data/training/sweeps/$SWEEP_PREFIX/${CONFIG_ID}.tsv"
+DIAG_ROOT="$ROOT/data/training/sweeps/$SWEEP_PREFIX/$CONFIG_ID"
+mkdir -p "$DIAG_ROOT"
+printf '%s\n' "$CONFIG_LINE" > "$DIAG_ROOT/config.tsv"
+printf '%s\n' \
+    "config_id=$CONFIG_ID" \
+    "stage=$STAGE" \
+    "workers=$WORKERS" \
+    "expected_cpus=$expected_cpus" \
+    "allocated_cpus=$allocated_cpus" \
+    "slurm_job_id=${SLURM_JOB_ID:-}" \
+    "slurm_array_job_id=${SLURM_ARRAY_JOB_ID:-}" \
+    "slurm_array_task_id=${SLURM_ARRAY_TASK_ID:-}" \
+    "server_stats_every=$RL_SERVER_STATS_EVERY" \
+    > "$DIAG_ROOT/resource.txt"
 printf '%s\n' \
     "[sweep] task=$TASK_ID stage=$STAGE config=$CONFIG_ID" \
     "[sweep] output=$RL_NAME" \
     "[sweep] workers=$WORKERS chunk=$CHUNK initial-delay-ms=$INITIAL_DELAY replacement-delay-ms=$REPLACEMENT_DELAY" \
-    "[sweep] learner-workers=$LEARNER_WORKERS seg=$SEG replay=$REPLAY servers=$SERVERS max-batch=$MAX_BATCH batch-window-ms=$BATCH_WINDOW" \
+    "[sweep] learner-workers=$LEARNER_WORKERS seg=$SEG replay=$REPLAY servers=$SERVERS max-batch=$MAX_BATCH batch-window-ms=$BATCH_WINDOW server-stats-every=$RL_SERVER_STATS_EVERY" \
     "[sweep] iterations=$ITERATIONS games=$GAMES arms-every=$ARMS_EVERY"
 
+# Capture the allocation before and after the run. The capture is best effort:
+# missing diagnostic utilities must not turn a valid RL result into a failure.
+PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
+CAPTURE_SCRIPT="$ROOT/scripts/quest/capture_quest_hardware.py"
+"$PYTHON" "$CAPTURE_SCRIPT" --phase start --out "$DIAG_ROOT/hardware-start.json" || true
+
+GPU_MONITOR_PID=""
+VMSTAT_PID=""
+GPU_MONITOR_ID="${CUDA_VISIBLE_DEVICES:-${SLURM_JOB_GPUS:-${SLURM_STEP_GPUS:-}}}"
+GPU_MONITOR_ID="${GPU_MONITOR_ID%%,*}"
+
+stop_monitoring() {
+    if [[ -n "$GPU_MONITOR_PID" ]]; then
+        kill "$GPU_MONITOR_PID" 2>/dev/null || true
+        wait "$GPU_MONITOR_PID" 2>/dev/null || true
+        GPU_MONITOR_PID=""
+    fi
+    if [[ -n "$VMSTAT_PID" ]]; then
+        kill "$VMSTAT_PID" 2>/dev/null || true
+        wait "$VMSTAT_PID" 2>/dev/null || true
+        VMSTAT_PID=""
+    fi
+}
+
+finish_task() {
+    local rc=$?
+    local finished_epoch started_epoch elapsed_s
+    finished_epoch="$(date +%s)"
+    started_epoch="$(awk -F= '$1 == "started_epoch" {print $2}' "$DIAG_ROOT/start.txt" 2>/dev/null || true)"
+    if [[ "$started_epoch" =~ ^[0-9]+$ ]]; then
+        elapsed_s=$((finished_epoch - started_epoch))
+    else
+        elapsed_s=""
+    fi
+    trap - EXIT TERM INT
+    stop_monitoring
+    "$PYTHON" "$CAPTURE_SCRIPT" --phase end --out "$DIAG_ROOT/hardware-end.json" || true
+    printf '%s\n' "$rc" > "$DIAG_ROOT/return-code"
+    printf '%s\n' \
+        "started_epoch=$started_epoch" \
+        "finished_epoch=$finished_epoch" \
+        "elapsed_s=$elapsed_s" \
+        "return_code=$rc" \
+        > "$DIAG_ROOT/timing.txt"
+    exit "$rc"
+}
+trap finish_task EXIT
+trap 'exit 143' TERM INT
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    printf '%s\n' \
+        'timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu,pstate' \
+        > "$DIAG_ROOT/gpu-utilization.csv"
+    (
+        while :; do
+            smi_args=(
+                --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu,pstate
+                --format=csv,noheader,nounits
+            )
+            if [[ -n "$GPU_MONITOR_ID" ]]; then
+                smi_args+=(--id="$GPU_MONITOR_ID")
+            fi
+            nvidia-smi "${smi_args[@]}" \
+                >> "$DIAG_ROOT/gpu-utilization.csv" \
+                2>> "$DIAG_ROOT/gpu-utilization.err" || true
+            sleep 10
+        done
+    ) &
+    GPU_MONITOR_PID=$!
+else
+    printf '%s\n' 'nvidia-smi not found' > "$DIAG_ROOT/gpu-utilization.err"
+fi
+
+if command -v vmstat >/dev/null 2>&1; then
+    vmstat 10 > "$DIAG_ROOT/cpu-vmstat.log" 2>&1 &
+    VMSTAT_PID=$!
+else
+    printf '%s\n' 'vmstat not found' > "$DIAG_ROOT/cpu-vmstat.log"
+fi
+
+printf '%s\n' "started_epoch=$(date +%s)" > "$DIAG_ROOT/start.txt"
+
 # The restart wrapper performs the environment, checkpoint, schedule, deck,
-# and GPU checks, then executes self-play with these exported values.
-exec bash scripts/quest/restart_constructed_four_rl_aggressive.sbatch
+# and GPU checks, then executes self-play. Tee preserves the normal Slurm log
+# stream while retaining a per-configuration copy for the summarizer.
+set +e
+bash scripts/quest/restart_constructed_four_rl_aggressive.sbatch \
+    > >(tee "$DIAG_ROOT/run.out") \
+    2> >(tee "$DIAG_ROOT/run.err" >&2)
+run_rc=$?
+set -e
+exit "$run_rc"

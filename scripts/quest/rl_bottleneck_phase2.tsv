@@ -1,0 +1,30 @@
+# id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
+# Batching screen: workers 8, 16, and 24 crossed with max_batch 8/16/32
+# and batch windows 3/12/24 ms. The mb16/t12 rows repeat Phase 1 controls.
+batch-w08-mb08-t03	generation	4000	8	15	0	8	256	1	2	8	3	1	2048	0
+batch-w08-mb08-t12	generation	4000	8	15	0	8	256	1	2	8	12	1	2048	0
+batch-w08-mb08-t24	generation	4000	8	15	0	8	256	1	2	8	24	1	2048	0
+batch-w08-mb16-t03	generation	4000	8	15	0	8	256	1	2	16	3	1	2048	0
+batch-w08-mb16-t12	generation	4000	8	15	0	8	256	1	2	16	12	1	2048	0
+batch-w08-mb16-t24	generation	4000	8	15	0	8	256	1	2	16	24	1	2048	0
+batch-w08-mb32-t03	generation	4000	8	15	0	8	256	1	2	32	3	1	2048	0
+batch-w08-mb32-t12	generation	4000	8	15	0	8	256	1	2	32	12	1	2048	0
+batch-w08-mb32-t24	generation	4000	8	15	0	8	256	1	2	32	24	1	2048	0
+batch-w16-mb08-t03	generation	4000	16	15	0	8	256	1	2	8	3	1	2048	0
+batch-w16-mb08-t12	generation	4000	16	15	0	8	256	1	2	8	12	1	2048	0
+batch-w16-mb08-t24	generation	4000	16	15	0	8	256	1	2	8	24	1	2048	0
+batch-w16-mb16-t03	generation	4000	16	15	0	8	256	1	2	16	3	1	2048	0
+batch-w16-mb16-t12	generation	4000	16	15	0	8	256	1	2	16	12	1	2048	0
+batch-w16-mb16-t24	generation	4000	16	15	0	8	256	1	2	16	24	1	2048	0
+batch-w16-mb32-t03	generation	4000	16	15	0	8	256	1	2	32	3	1	2048	0
+batch-w16-mb32-t12	generation	4000	16	15	0	8	256	1	2	32	12	1	2048	0
+batch-w16-mb32-t24	generation	4000	16	15	0	8	256	1	2	32	24	1	2048	0
+batch-w24-mb08-t03	generation	4000	24	15	0	8	256	1	2	8	3	1	2048	0
+batch-w24-mb08-t12	generation	4000	24	15	0	8	256	1	2	8	12	1	2048	0
+batch-w24-mb08-t24	generation	4000	24	15	0	8	256	1	2	8	24	1	2048	0
+batch-w24-mb16-t03	generation	4000	24	15	0	8	256	1	2	16	3	1	2048	0
+batch-w24-mb16-t12	generation	4000	24	15	0	8	256	1	2	16	12	1	2048	0
+batch-w24-mb16-t24	generation	4000	24	15	0	8	256	1	2	16	24	1	2048	0
+batch-w24-mb32-t03	generation	4000	24	15	0	8	256	1	2	32	3	1	2048	0
+batch-w24-mb32-t12	generation	4000	24	15	0	8	256	1	2	32	12	1	2048	0
+batch-w24-mb32-t24	generation	4000	24	15	0	8	256	1	2	32	24	1	2048	0

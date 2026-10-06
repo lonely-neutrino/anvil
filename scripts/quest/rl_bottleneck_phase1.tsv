@@ -1,0 +1,8 @@
+# id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
+# One startup-inclusive iteration per worker count. The fixed batch/window row
+# establishes worker scaling before the Phase 2 batching screen.
+workers-w08-mb16-t12	generation	4000	8	15	0	8	256	1	2	16	12	1	2048	0
+workers-w12-mb16-t12	generation	4000	12	15	0	8	256	1	2	16	12	1	2048	0
+workers-w16-mb16-t12	generation	4000	16	15	0	8	256	1	2	16	12	1	2048	0
+workers-w20-mb16-t12	generation	4000	20	15	0	8	256	1	2	16	12	1	2048	0
+workers-w24-mb16-t12	generation	4000	24	15	0	8	256	1	2	16	12	1	2048	0

@@ -6,6 +6,9 @@ next. Each array task gets one GPU, a unique RL output name, and a job-derived
 model-server port range. All tasks can share the same BC checkpoint and pair
 schedule read-only.
 
+For the current one-iteration A100 worker/batching bottleneck study, use
+[`quest-rl-bottleneck-sweep.md`](quest-rl-bottleneck-sweep.md) instead.
+
 The first screen is intentionally short:
 
 - two RL iterations;
