@@ -37,7 +37,8 @@ _quest_prepend_path() {
     local directory="$1"
     [[ -d "$directory" ]] || return 0
     case ":${PATH:-}:" in
-        *":$directory:"*) ;;
+        # Leave it alone only when it is already the first PATH entry.
+        ":$directory:"*) ;;
         *) PATH="$directory${PATH:+:$PATH}" ;;
     esac
 }
