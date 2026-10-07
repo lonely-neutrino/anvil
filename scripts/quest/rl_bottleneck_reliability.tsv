@@ -1,0 +1,5 @@
+# id	stage	initial_delay_ms	workers	chunk	replacement_delay_ms	learner_workers	seg	replay	servers	max_batch	batch_window_ms	iterations	games	arms_every
+# Fixed reliability check against the Phase 1 w16 control, with staggered
+# replacement launches to test whether immediate replacement caused the
+# BridgePoisonedException rate.
+reliability-w16-mb16-t12-r500	reliability	4000	16	15	500	8	256	1	2	16	12	1	2048	0
