@@ -30,6 +30,20 @@ temporarily use a private branch with the same files.
 
 ## 2. Build the matching Forge fork
 
+When opening a new Quest/PuTTY session, source the reusable environment setup
+before building or submitting jobs. It uses the Java 17, Git, and Maven paths
+from the successful Quest jobs and prevents the Maven environment from leaving
+Java 11 first on `PATH`:
+
+```bash
+cd /projects/<account>/<netid>/mtg-ai/anvil
+source scripts/quest/quest_env.sh
+```
+
+The script is source-only because a child shell cannot modify the parent
+shell's environment. Override `QUEST_GIT_ROOT`, `QUEST_JAVA_HOME`, or
+`QUEST_MAVEN_HOME` before sourcing if those site paths change.
+
 Anvil needs the fork, not upstream Forge:
 
 ```bash
